@@ -270,14 +270,29 @@ class BusView(discord.ui.View):
 
 
 class StationView(discord.ui.View):
-    def __init__(self, stop_id, stop_name):
+    def __init__(self, stop_id, stop_name, buses=(), route=None):
         super().__init__(timeout=180)
-        self.stop_id, self.stop_name = stop_id, stop_name
+        self.stop_id, self.stop_name, self.buses, self.route = stop_id, stop_name, list(buses), route
+        routes = sorted({b["route"] for b in self.buses})[:24]
+        if routes:
+            select = discord.ui.Select(placeholder="Filter by bus", options=[discord.SelectOption(label="All buses", value="__all__", default=route is None)] + [discord.SelectOption(label=r[:100], value=r, default=r == route) for r in routes], row=0)
+            select.callback = self.route_changed
+            self.add_item(select)
 
-    @discord.ui.button(label="🔄 Refresh Live Times", style=discord.ButtonStyle.success)
+    def embed(self):
+        shown = [b for b in self.buses if not self.route or b["route"] == self.route]
+        return station_embed(self.stop_id, self.stop_name, shown)
+
+    async def route_changed(self, interaction):
+        value = interaction.data["values"][0]
+        view = StationView(self.stop_id, self.stop_name, self.buses, None if value == "__all__" else value)
+        await interaction.response.edit_message(embed=view.embed(), view=view)
+
+    @discord.ui.button(label="🔄 Refresh Live Times", style=discord.ButtonStyle.success, row=1)
     async def refresh(self, interaction, button):
         await interaction.response.defer()
-        await interaction.edit_original_response(embed=station_embed(self.stop_id, self.stop_name, await get_stop_times(self.stop_id)), view=self)
+        view = StationView(self.stop_id, self.stop_name, await get_stop_times(self.stop_id), self.route)
+        await interaction.edit_original_response(embed=view.embed(), view=view)
 
 
 def station_embed(stop_id, name, buses):
@@ -331,7 +346,7 @@ async def station(interaction: discord.Interaction, station_number: str):
     except RuntimeError as exc:
         await interaction.followup.send(str(exc))
         return
-    await interaction.followup.send(embed=station_embed(stop_id, name, buses), view=StationView(stop_id, name))
+    await interaction.followup.send(embed=station_embed(stop_id, name, buses), view=StationView(stop_id, name, buses))
 
 
 @bot.tree.command(name="bus", description="Show live buses operating on an MTA route")
