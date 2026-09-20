@@ -32,7 +32,7 @@ LIMITED_ROUTES = {"Q50", "Q61", "Q74", "Q90", "Q98", "Q100"}
 
 def service_type(route_name="", destination=""):
     """Return one of: local, limited, sbs, express, rush."""
-    name = str(route_name or "").upper().strip()
+    name = str(route_name or "").upper().strip().split("_")[-1]
     dest = str(destination or "").upper()
     text = f"{name} {dest}"
     if _EXPRESS.match(name):
