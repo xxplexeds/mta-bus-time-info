@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from flask import Flask
 
 from service_types import service_type, emoji, label, badge
+from depots import depot_badge
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -154,6 +155,11 @@ async def get_route_stops(route: str):
     return []
 
 
+def depot_tag(vehicle):
+    tag = depot_badge(vehicle)
+    return f" · {tag}" if tag else ""
+
+
 def normalize(value):
     return " ".join(str(value or "").lower().replace("/", " ").split())
 
@@ -198,7 +204,7 @@ async def get_stop_times(stop_id):
             if journey:
                 route_name = str(journey.get("PublishedLineName") or journey.get("LineRef") or "Unknown")
                 destination = str(journey.get("DestinationName") or "Unknown destination")
-                result.append({"route": route_name, "destination": destination, "status": status(journey.get("MonitoredCall", {})), "service": service_type(route_name, destination)})
+                result.append({"route": route_name, "destination": destination, "status": status(journey.get("MonitoredCall", {})), "service": service_type(route_name, destination), "vehicle": str(journey.get("VehicleRef") or "")})
     return result
 
 
@@ -236,7 +242,7 @@ def route_embed(route, vehicles, stations, destination=None, selected=None):
     embed = discord.Embed(title=f"🚌 {route} — {destination_title}", color=0x0039A6)
     header = f"{badge(service_type(route))}\n\n"
     if selected:
-        text = "\n\n".join(f"{emoji(v['service'])} **{v['vehicle']}** — 📍 {v['stop']}\n➡️ {v['destination']} ({v['status']}) • {label(v['service'])}" for v in shown[:15])
+        text = "\n\n".join(f"{emoji(v['service'])} **{v['vehicle']}**{depot_tag(v['vehicle'])} — 📍 {v['stop']}\n➡️ {v['destination']} ({v['status']}) • {label(v['service'])}" for v in shown[:15])
         embed.description = f"{header}Station filter: **{selected}**\n\n{text or 'No live buses were found for this station.'}"
     elif stations:
         current_indexes = [i for i, stop in enumerate(stations) if any(matches(stop, v["stop"]) for v in shown)]
@@ -247,7 +253,7 @@ def route_embed(route, vehicles, stations, destination=None, selected=None):
             marker = CURRENT_BUS if at_stop else (CHECKPOINT if current is not None and index < current else ENDPOINT if index == len(stations) - 1 else ROUTE_LINE)
             details = ""
             if at_stop:
-                bus_ids = ", ".join(f"{emoji(v['service'])} {v['vehicle']}" for v in at_stop[:3])
+                bus_ids = ", ".join(f"{emoji(v['service'])} {v['vehicle']}{depot_tag(v['vehicle'])}" for v in at_stop[:3])
                 details = f" — {at_stop[0]['status']} ({bus_ids})"
             lines.append(f"{marker} **{index + 1}. {stop}**{details}" if at_stop else f"{marker} {index + 1}. {stop}")
         text = "\n".join(lines)
@@ -321,7 +327,9 @@ class StationView(discord.ui.View):
 def station_embed(stop_id, name, buses):
     embed = discord.Embed(title="🚌 Real-Time Bus Arrivals", description=f"📍 **{name or 'Unknown stop'}**\nStop ID: **{stop_id}**", color=0x0039A6)
     for bus in buses:
-        embed.add_field(name=f"📌 Route **{bus['route']}**", value=f"**Service:** {badge(bus['service'])}\n**Destination:** {bus['destination']}\n**Status:** {bus['status']}", inline=False)
+        depot = depot_badge(bus.get("vehicle"))
+        depot_line = f"**Depot:** {depot}\n" if depot else ""
+        embed.add_field(name=f"📌 Route **{bus['route']}**", value=f"**Service:** {badge(bus['service'])}\n{depot_line}**Destination:** {bus['destination']}\n**Status:** {bus['status']}", inline=False)
     if not buses:
         embed.add_field(name="⚠️ No Services", value="No upcoming buses detected for this stop.", inline=False)
     return embed
