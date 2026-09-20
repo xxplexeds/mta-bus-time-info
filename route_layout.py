@@ -177,3 +177,45 @@ def render_route(route, stations, shown, matches, limit=3800):
         noun = "bus" if len(unplaced) == 1 else "buses"
         text += f"\n\n*+{len(unplaced)} {noun} not on this stop list (other direction)*"
     return text
+
+
+def route_pages(route, stations, shown, matches, limit=3800):
+    """Like render_route, but instead of collapsing long quiet stretches into a
+    '+N more stops' gap, splits the full stop list into pages of `limit` characters
+    each, so nothing is hidden -- the caller pages through it with buttons instead."""
+    at = [[v for v in shown if matches(stop, v["stop"])] for stop in stations]
+    placed = {id(v) for buses in at for v in buses}
+    first = next((i for i, buses in enumerate(at) if buses), None)
+    last = len(stations) - 1
+
+    blocks = []
+    for i, stop in enumerate(stations):
+        if at[i]:
+            blocks.append(_bus_block(route, stop, at[i], spacer=False))
+            continue
+        if i == 0:
+            glyph = G["start"]
+        elif i == last:
+            glyph = G["end"]
+        elif first is not None and i < first:
+            glyph = G["passed"]
+        else:
+            glyph = G["stop"]
+        blocks.append([f"{glyph} {pretty(stop)}"])
+
+    pages, current, size = [], [], 0
+    for block in blocks:
+        text = "\n".join(block)
+        block_len = len(text) + 1  # +1 for the join newline
+        if current and size + block_len > limit:
+            pages.append("\n".join(current))
+            current, size = [], 0
+        current.append(text)
+        size += block_len
+    pages.append("\n".join(current))  # always at least one page, even if empty
+
+    unplaced = [v for v in shown if id(v) not in placed]
+    if unplaced:
+        noun = "bus" if len(unplaced) == 1 else "buses"
+        pages[-1] += f"\n\n*+{len(unplaced)} {noun} not on this stop list (other direction)*"
+    return pages
