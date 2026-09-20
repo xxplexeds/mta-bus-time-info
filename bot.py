@@ -230,69 +230,43 @@ async def get_route_buses(route):
     return result
 
 
-def route_embed(route, vehicles, stations, destination=None, selected=None):
-    shown = [v for v in vehicles if (not destination or v["destination"] == destination) and (not selected or matches(selected, v["stop"]))]
+def route_embed(route, vehicles, stations, destination=None):
+    shown = [v for v in vehicles if not destination or v["destination"] == destination]
     destination_title = destination or (shown[0]["destination"] if len({v["destination"] for v in shown}) == 1 and shown else "Bus Service")
     embed = discord.Embed(title=f"🚌 {route} — {pretty(destination_title)}", color=0x0039A6)
     header = f"{badge(service_type(route))}\n\n"
-    if selected:
-        cards = render_cards(route, shown[:15]) or "No live buses were found for this station."
-        body = f"Station filter: **{pretty(selected)}**\n\n{cards}"
-    elif stations:
+    if stations:
         body = render_route(route, stations, shown, matches)
     else:
-        body = "No station list was found for this route."
+        cards = render_cards(route, shown[:15])
+        body = f"No station list was found for this route, so here are the live buses:\n\n{cards}" if cards else "No station list or live buses were found for this route."
     embed.description = header + body
     embed.set_footer(text=f"Updated {datetime.datetime.now().strftime('%I:%M %p')} • Refresh for current positions")
     return embed
 
 
 class BusView(discord.ui.View):
-    def __init__(self, route, vehicles, stations, destination=None, page=0, selected=None):
+    def __init__(self, route, vehicles, stations, destination=None):
         super().__init__(timeout=120)
-        self.route, self.vehicles, self.stations = route, vehicles, stations
-        self.destination, self.page, self.selected = destination, page, selected
+        self.route, self.vehicles, self.stations, self.destination = route, vehicles, stations, destination
         destinations = sorted({v["destination"] for v in vehicles if v["destination"] != "Destination unavailable"})[:24]
         dest = discord.ui.Select(placeholder="Filter by destination", options=[discord.SelectOption(label="All destinations", value="__all__")] + [discord.SelectOption(label=d[:100], value=d) for d in destinations], row=0)
         dest.callback = self.destination_changed
         self.add_item(dest)
-        start = page * 24
-        station = discord.ui.Select(placeholder="Filter by stations", options=[discord.SelectOption(label="All stations", value="__all__")] + [discord.SelectOption(label=s[:100], value=s[:100]) for s in stations[start:start + 24]], row=1)
-        station.callback = self.station_changed
-        self.add_item(station)
-        refresh = discord.ui.Button(label="🔄 Refresh", style=discord.ButtonStyle.success, row=2)
+        refresh = discord.ui.Button(label="🔄 Refresh", style=discord.ButtonStyle.success, row=1)
         refresh.callback = self.refresh_clicked
         self.add_item(refresh)
-        if start > 0 or start + 24 < len(stations):
-            previous = discord.ui.Button(label="◀ Previous stations", style=discord.ButtonStyle.secondary, row=2, disabled=start == 0)
-            previous.callback = self.previous_clicked
-            self.add_item(previous)
-            nxt = discord.ui.Button(label="Next stations ▶", style=discord.ButtonStyle.secondary, row=2, disabled=start + 24 >= len(stations))
-            nxt.callback = self.next_clicked
-            self.add_item(nxt)
 
     async def destination_changed(self, interaction):
         self.destination = interaction.data["values"][0]
         if self.destination == "__all__":
             self.destination = None
-        await interaction.response.edit_message(embed=route_embed(self.route, self.vehicles, self.stations, self.destination, self.selected), view=self)
-
-    async def station_changed(self, interaction):
-        self.selected = interaction.data["values"][0]
-        if self.selected == "__all__":
-            self.selected = None
-        await interaction.response.edit_message(embed=route_embed(self.route, self.vehicles, self.stations, self.destination, self.selected), view=self)
+        await interaction.response.edit_message(embed=route_embed(self.route, self.vehicles, self.stations, self.destination), view=self)
 
     async def refresh_clicked(self, interaction):
         await interaction.response.defer()
         vehicles = await get_route_buses(self.route)
-        await interaction.edit_original_response(embed=route_embed(self.route, vehicles, self.stations, self.destination, self.selected), view=BusView(self.route, vehicles, self.stations, self.destination, self.page, self.selected))
-
-    async def previous_clicked(self, interaction):
-        await interaction.response.edit_message(embed=route_embed(self.route, self.vehicles, self.stations, self.destination, self.selected), view=BusView(self.route, self.vehicles, self.stations, self.destination, self.page - 1, self.selected))
-
-    async def next_clicked(self, interaction):
-        await interaction.response.edit_message(embed=route_embed(self.route, self.vehicles, self.stations, self.destination, self.selected), view=BusView(self.route, self.vehicles, self.stations, self.destination, self.page + 1, self.selected))
+        await interaction.edit_original_response(embed=route_embed(self.route, vehicles, self.stations, self.destination), view=BusView(self.route, vehicles, self.stations, self.destination))
 
 
 class StationView(discord.ui.View):
