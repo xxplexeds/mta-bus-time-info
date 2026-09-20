@@ -16,7 +16,6 @@ from flask import Flask
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 MTA_KEY = os.getenv("MTA_API_KEY")
-
 health_app = Flask(__name__)
 
 
@@ -26,8 +25,7 @@ def health_check():
 
 
 def run_health_server():
-    port = int(os.getenv("PORT", "10000"))
-    health_app.run(host="0.0.0.0", port=port, use_reloader=False)
+    health_app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")), use_reloader=False)
 
 
 GTFS_FEED_URLS = (
@@ -38,74 +36,66 @@ GTFS_FEED_URLS = (
     "https://web.mta.info/developers/data/nyct/bus/google_transit_staten_island.zip",
     "https://web.mta.info/developers/data/busco/google_transit.zip",
 )
-
 _stop_names: dict[str, str] = {}
 _route_stops: dict[str, list[str]] = {}
 _gtfs_loaded = False
 _gtfs_lock = asyncio.Lock()
 
 
-def _read_csv(archive: zipfile.ZipFile, filename: str) -> list[dict[str, str]]:
-    with archive.open(filename) as raw_file:
-        text_file = io.TextIOWrapper(raw_file, encoding="utf-8-sig", newline="")
-        return list(csv.DictReader(text_file))
+def _read_csv(archive: zipfile.ZipFile, filename: str):
+    with archive.open(filename) as raw:
+        return list(csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")))
 
 
-async def load_gtfs() -> None:
-    """Cache stop names and an ordered representative stop list for each route."""
+async def load_gtfs():
     global _gtfs_loaded
     if _gtfs_loaded:
         return
-
     async with _gtfs_lock:
         if _gtfs_loaded:
             return
-        timeout = aiohttp.ClientTimeout(total=45)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            for feed_url in GTFS_FEED_URLS:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as session:
+            for url in GTFS_FEED_URLS:
                 try:
-                    async with session.get(feed_url) as response:
+                    async with session.get(url) as response:
                         response.raise_for_status()
-                        archive_data = await response.read()
-                    with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
+                        data = await response.read()
+                    with zipfile.ZipFile(io.BytesIO(data)) as archive:
                         for row in _read_csv(archive, "stops.txt"):
                             stop_id = (row.get("stop_id") or "").strip()
-                            stop_name = (row.get("stop_name") or "").strip()
-                            if stop_id and stop_name:
-                                _stop_names.setdefault(stop_id, stop_name)
-
-                        # Build route stop sequences from one representative trip per route.
+                            name = (row.get("stop_name") or "").strip()
+                            if stop_id and name:
+                                _stop_names.setdefault(stop_id, name)
                         trips = _read_csv(archive, "trips.txt")
                         stop_times = _read_csv(archive, "stop_times.txt")
-                        trip_by_id = {}
+                        representative = {}
                         for trip in trips:
                             route = (trip.get("route_id") or "").strip().upper()
                             trip_id = (trip.get("trip_id") or "").strip()
                             if route and trip_id:
-                                trip_by_id.setdefault(route, trip_id)
-                        stops_by_trip: dict[str, list[tuple[int, str]]] = {}
+                                representative.setdefault(route, trip_id)
+                        sequences: dict[str, list[tuple[int, str]]] = {}
                         for row in stop_times:
                             trip_id = (row.get("trip_id") or "").strip()
                             stop_id = (row.get("stop_id") or "").strip()
                             if trip_id and stop_id:
                                 try:
-                                    sequence = int(row.get("stop_sequence") or 0)
+                                    seq = int(row.get("stop_sequence") or 0)
                                 except ValueError:
-                                    sequence = 0
-                                stops_by_trip.setdefault(trip_id, []).append((sequence, stop_id))
-                        for route, trip_id in trip_by_id.items():
-                            ordered = sorted(stops_by_trip.get(trip_id, []))
-                            names = [_stop_names[stop_id] for _, stop_id in ordered if stop_id in _stop_names]
+                                    seq = 0
+                                sequences.setdefault(trip_id, []).append((seq, stop_id))
+                        for route, trip_id in representative.items():
+                            ordered = sorted(sequences.get(trip_id, []))
+                            names = [_stop_names[s] for _, s in ordered if s in _stop_names]
                             if names:
                                 _route_stops.setdefault(route, names)
                 except (aiohttp.ClientError, OSError, KeyError, zipfile.BadZipFile) as exc:
-                    print(f"Could not load GTFS feed {feed_url}: {exc}")
-
+                    print(f"Could not load GTFS feed {url}: {exc}")
         _gtfs_loaded = True
         print(f"Loaded {len(_stop_names)} stops and {len(_route_stops)} routes from GTFS")
 
 
-async def get_stop_name(stop_id: str) -> str | None:
+async def get_stop_name(stop_id: str):
     await load_gtfs()
     return _stop_names.get(stop_id)
 
@@ -114,16 +104,8 @@ def _normalize(value: str) -> str:
     return value.strip()
 
 
-def _extract_distance(monitored_call: dict) -> str:
-    distances = (monitored_call.get("Extensions") or {}).get("Distances") or {}
-    for key in ("PresentableDistance", "DistanceFromStop", "DistanceFromCall"):
-        if distances.get(key):
-            return str(distances[key])
-    return "N/A"
-
-
-def _format_arrival_status(monitored_call: dict) -> str:
-    expected = monitored_call.get("ExpectedArrivalTime")
+def _format_arrival_status(call: dict) -> str:
+    expected = call.get("ExpectedArrivalTime")
     if expected:
         try:
             arrival = datetime.datetime.fromisoformat(expected.replace("Z", "+00:00"))
@@ -132,22 +114,26 @@ def _format_arrival_status(monitored_call: dict) -> str:
             return "🟢 Arriving now" if minutes == 0 else f"🟢 {minutes} mins"
         except ValueError:
             pass
-    return f"🟡 {monitored_call['ArrivalProximityText']}" if monitored_call.get("ArrivalProximityText") else "⚪ No ETA"
+    return f"🟡 {call['ArrivalProximityText']}" if call.get("ArrivalProximityText") else "⚪ No ETA"
+
+
+def _extract_distance(call: dict) -> str:
+    distances = (call.get("Extensions") or {}).get("Distances") or {}
+    return next((str(distances[k]) for k in ("PresentableDistance", "DistanceFromStop", "DistanceFromCall") if distances.get(k)), "N/A")
 
 
 async def get_bus_times(stop_id: str):
     if not MTA_KEY:
         raise RuntimeError("MTA_API_KEY environment variable not found.")
-    params = {"key": MTA_KEY, "MonitoringRef": _normalize(stop_id)}
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            params = {"key": MTA_KEY, "MonitoringRef": _normalize(stop_id)}
             async with session.get("https://bustime.mta.info/api/siri/stop-monitoring.json", params=params) as response:
                 response.raise_for_status()
                 payload = await response.json()
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
         print(f"Error fetching stop data: {exc}")
         return []
-
     deliveries = payload.get("Siri", {}).get("ServiceDelivery", {}).get("StopMonitoringDelivery", [])
     if isinstance(deliveries, dict):
         deliveries = [deliveries]
@@ -160,112 +146,121 @@ async def get_bus_times(stop_id: str):
             journey = visit.get("MonitoredVehicleJourney", {})
             if journey:
                 call = journey.get("MonitoredCall", {})
-                buses.append({
-                    "route": str(journey.get("PublishedLineName") or journey.get("LineRef") or "Unknown"),
-                    "destination": str(journey.get("DestinationName") or "Unknown destination"),
-                    "status": _format_arrival_status(call),
-                    "distance": _extract_distance(call),
-                })
+                buses.append({"route": str(journey.get("PublishedLineName") or journey.get("LineRef") or "Unknown"), "destination": str(journey.get("DestinationName") or "Unknown destination"), "status": _format_arrival_status(call), "distance": _extract_distance(call)})
     return buses
 
 
-async def get_route_buses(route: str) -> list[dict]:
-    """Get live vehicles for a route using SIRI VehicleMonitoring."""
+async def get_route_buses(route: str):
     if not MTA_KEY:
         raise RuntimeError("MTA_API_KEY environment variable not found.")
-    params = {"key": MTA_KEY, "LineRef": _normalize(route), "VehicleMonitoringDetailLevel": "calls"}
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            params = {"key": MTA_KEY, "LineRef": _normalize(route), "VehicleMonitoringDetailLevel": "calls"}
             async with session.get("https://bustime.mta.info/api/siri/vehicle-monitoring.json", params=params) as response:
                 response.raise_for_status()
                 payload = await response.json()
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
         print(f"Error fetching route data: {exc}")
         return []
-
-    activities = payload.get("Siri", {}).get("ServiceDelivery", {}).get("VehicleMonitoringDelivery", [])
-    if isinstance(activities, dict):
-        activities = [activities]
+    deliveries = payload.get("Siri", {}).get("ServiceDelivery", {}).get("VehicleMonitoringDelivery", [])
+    if isinstance(deliveries, dict):
+        deliveries = [deliveries]
     vehicles = []
-    for delivery in activities:
-        rows = delivery.get("VehicleActivity", [])
-        if isinstance(rows, dict):
-            rows = [rows]
-        for row in rows:
-            journey = row.get("MonitoredVehicleJourney", {})
+    for delivery in deliveries:
+        activities = delivery.get("VehicleActivity", [])
+        if isinstance(activities, dict):
+            activities = [activities]
+        for activity in activities:
+            journey = activity.get("MonitoredVehicleJourney", {})
             call = journey.get("MonitoredCall", {}) or {}
-            if not journey:
-                continue
-            vehicles.append({
-                "vehicle": str(journey.get("VehicleRef") or "Unknown bus"),
-                "destination": str(journey.get("DestinationName") or "Destination unavailable"),
-                "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable"),
-                "direction": str(journey.get("DirectionRef") or ""),
-            })
+            if journey:
+                vehicles.append({"vehicle": str(journey.get("VehicleRef") or "Unknown bus"), "destination": str(journey.get("DestinationName") or "Destination unavailable"), "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable")})
     return vehicles
 
 
-def create_bus_embed(route: str, vehicles: list[dict], destination: str | None = None) -> discord.Embed:
-    shown = [v for v in vehicles if not destination or v["destination"] == destination]
+def create_bus_embed(route: str, vehicles: list[dict], destination=None, station=None):
+    shown = [v for v in vehicles if (not destination or v["destination"] == destination) and (not station or v["stop"] == station)]
     embed = discord.Embed(title=f"🚌 {route.upper()} Bus Service", color=0x0039A6)
+    if station:
+        embed.description = f"Station filter: **{station}**"
     if not shown:
-        embed.description = "No live buses were found for this selection."
-        return embed
-    lines = []
-    for bus in shown[:15]:
-        lines.append(f"🚌 **{bus['vehicle']}** — 📍 {bus['stop']}\n➡️ {bus['destination']}")
-    embed.description = "\n\n".join(lines)
+        embed.description = (embed.description or "") + "\nNo live buses were found for this selection."
+    else:
+        lines = [f"🚌 **{v['vehicle']}** — 📍 {v['stop']}\n➡️ {v['destination']}" for v in shown[:15]]
+        embed.description = (embed.description + "\n\n" if embed.description else "") + "\n\n".join(lines)
     embed.set_footer(text=f"Updated {datetime.datetime.now().strftime('%I:%M %p')} • Use Refresh for current positions")
     return embed
 
 
 class BusRouteView(discord.ui.View):
-    def __init__(self, route: str, vehicles: list[dict]):
+    def __init__(self, route: str, vehicles: list[dict], destination=None, station_page=0):
         super().__init__(timeout=300)
-        self.route = route
-        self.vehicles = vehicles
+        self.route, self.vehicles = route, vehicles
+        self.destination, self.station_page = destination, station_page
         destinations = sorted({v["destination"] for v in vehicles if v["destination"] != "Destination unavailable"})[:24]
-        options = [discord.SelectOption(label="All destinations", value="__all__")]
-        options += [discord.SelectOption(label=value[:100], value=value) for value in destinations]
-        self.destination_select = discord.ui.Select(placeholder="Filter by destination", options=options, row=0)
-        self.destination_select.callback = self.destination_changed
-        self.add_item(self.destination_select)
+        options = [discord.SelectOption(label="All destinations", value="__all__")] + [discord.SelectOption(label=d[:100], value=d) for d in destinations]
+        destination_select = discord.ui.Select(placeholder="Filter by destination", options=options, row=0)
+        destination_select.callback = self.destination_changed
+        self.add_item(destination_select)
 
-        refresh = discord.ui.Button(label="🔄 Refresh", style=discord.ButtonStyle.success, row=1)
+        stations = _route_stops.get(route.upper(), [])
+        start = station_page * 24
+        page_stations = stations[start:start + 24]
+        station_options = [discord.SelectOption(label="All stations", value="__all__")] + [discord.SelectOption(label=s[:100], value=s[:100]) for s in page_stations]
+        station_select = discord.ui.Select(placeholder="Filter by stations", options=station_options, row=1)
+        station_select.callback = self.station_changed
+        self.add_item(station_select)
+
+        refresh = discord.ui.Button(label="🔄 Refresh", style=discord.ButtonStyle.success, row=2)
         refresh.callback = self.refresh_clicked
         self.add_item(refresh)
+        if start > 0 or start + 24 < len(stations):
+            previous = discord.ui.Button(label="◀ Previous stations", style=discord.ButtonStyle.secondary, row=2, disabled=start == 0)
+            previous.callback = self.previous_stations
+            self.add_item(previous)
+            next_button = discord.ui.Button(label="Next stations ▶", style=discord.ButtonStyle.secondary, row=2, disabled=start + 24 >= len(stations))
+            next_button.callback = self.next_stations
+            self.add_item(next_button)
 
-    async def destination_changed(self, interaction: discord.Interaction):
-        value = self.destination_select.values[0]
-        destination = None if value == "__all__" else value
-        await interaction.response.edit_message(embed=create_bus_embed(self.route, self.vehicles, destination), view=self)
+    async def destination_changed(self, interaction):
+        value = interaction.data["values"][0]
+        self.destination = None if value == "__all__" else value
+        await interaction.response.edit_message(embed=create_bus_embed(self.route, self.vehicles, self.destination), view=self)
 
-    async def refresh_clicked(self, interaction: discord.Interaction):
+    async def station_changed(self, interaction):
+        value = interaction.data["values"][0]
+        station = None if value == "__all__" else value
+        await interaction.response.edit_message(embed=create_bus_embed(self.route, self.vehicles, self.destination, station), view=self)
+
+    async def refresh_clicked(self, interaction):
         await interaction.response.defer()
         self.vehicles = await get_route_buses(self.route)
-        await interaction.edit_original_response(embed=create_bus_embed(self.route, self.vehicles), view=BusRouteView(self.route, self.vehicles))
+        await interaction.edit_original_response(embed=create_bus_embed(self.route, self.vehicles, self.destination), view=BusRouteView(self.route, self.vehicles, self.destination, self.station_page))
+
+    async def previous_stations(self, interaction):
+        await interaction.response.edit_message(embed=create_bus_embed(self.route, self.vehicles, self.destination), view=BusRouteView(self.route, self.vehicles, self.destination, self.station_page - 1))
+
+    async def next_stations(self, interaction):
+        await interaction.response.edit_message(embed=create_bus_embed(self.route, self.vehicles, self.destination), view=BusRouteView(self.route, self.vehicles, self.destination, self.station_page + 1))
 
 
 class StationRefreshView(discord.ui.View):
-    def __init__(self, stop_id: str, stop_name: str | None):
+    def __init__(self, stop_id, stop_name):
         super().__init__(timeout=180)
         self.stop_id, self.stop_name = stop_id, stop_name
 
     @discord.ui.button(label="🔄 Refresh Live Times", style=discord.ButtonStyle.success)
-    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def refresh_button(self, interaction, button):
         await interaction.response.defer()
-        data = await get_bus_times(self.stop_id)
-        await interaction.edit_original_response(embed=create_station_embed(self.stop_id, self.stop_name, data), view=self)
+        await interaction.edit_original_response(embed=create_station_embed(self.stop_id, self.stop_name, await get_bus_times(self.stop_id)), view=self)
 
 
-def create_station_embed(stop_id: str, stop_name: str | None, data: list[dict]) -> discord.Embed:
+def create_station_embed(stop_id, stop_name, data):
     embed = discord.Embed(title="🚌 Real-Time Bus Arrivals", description=f"📍 **{stop_name or 'Unknown stop'}**\nStop ID: **{stop_id}**", color=0x0039A6)
-    if data:
-        for bus in data:
-            embed.add_field(name=f"📌 Route **{bus['route']}**", value=f"**Destination:** {bus['destination']}\n**Status:** {bus['status']} ({bus['distance']})", inline=False)
-    else:
+    for bus in data:
+        embed.add_field(name=f"📌 Route **{bus['route']}**", value=f"**Destination:** {bus['destination']}\n**Status:** {bus['status']} ({bus['distance']})", inline=False)
+    if not data:
         embed.add_field(name="⚠️ No Services", value="No upcoming buses detected for this stop.", inline=False)
-    embed.set_footer(text=f"Updated {datetime.datetime.now().strftime('%I:%M %p')}")
     return embed
 
 
@@ -301,6 +296,7 @@ async def bus(interaction: discord.Interaction, bus: str):
     route = _normalize(bus).upper()
     try:
         vehicles = await get_route_buses(route)
+        await load_gtfs()
     except RuntimeError as exc:
         await interaction.followup.send(str(exc))
         return
