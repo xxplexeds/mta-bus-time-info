@@ -16,7 +16,7 @@ from flask import Flask
 
 from service_types import service_type, badge
 from depots import DEPOTS, depot_badge, set_emojis as set_depot_emojis
-from route_layout import pretty, render_cards, render_route
+from route_layout import pretty, render_cards, render_route, route_pages
 try:
     from route_layout import set_glyph_emojis
 except ImportError:  # an older route_layout.py without name-based emoji lookup: keep its hard-coded GLYPHS
@@ -409,21 +409,28 @@ class SavedLayout(discord.ui.LayoutView):
 class RouteLayout(discord.ui.LayoutView):
     """/bus as a Components V2 card: header, service status, the stop list with buses, and the controls."""
 
-    def __init__(self, route, vehicles, stations, alerts, destination=None):
+    def __init__(self, route, vehicles, stations, alerts, destination=None, page=0):
         super().__init__(timeout=120)
         self.route, self.vehicles, self.stations, self.alerts, self.destination = route, vehicles, stations, alerts, destination
         shown = [v for v in vehicles if not destination or v["destination"] == destination]
         title = destination or (shown[0]["destination"] if len({v["destination"] for v in shown}) == 1 and shown else "Bus Service")
         header = f"## 🚌 {route} — {pretty(title)}\n{badge(service_type(route))}"
         status_block = status_text(alerts)
-        footer = f"-# Updated <t:{int(datetime.datetime.now().timestamp())}:t> · Refresh for current positions"
         # Discord allows 4000 characters of text per message: give the stop list whatever the rest leaves
-        limit = max(1200, V2_MAX_TEXT + 100 - len(header) - len(status_block) - len(footer) - 120)
+        limit = max(1200, V2_MAX_TEXT + 100 - len(header) - len(status_block) - 220)
         if stations:
-            body = render_route(route, stations, shown, matches, limit=limit)
+            pages = route_pages(route, stations, shown, matches, limit=limit)
+            self.page = max(0, min(page, len(pages) - 1))
+            body = pages[self.page]
+            page_note = f" · Page {self.page + 1}/{len(pages)}" if len(pages) > 1 else ""
         else:
+            self.page = 0
+            pages = [""]
             cards = render_cards(route, shown[:15], limit=min(3500, limit))
             body = f"No station list was found for this route, so here are the live buses:\n\n{cards}" if cards else "No station list or live buses were found for this route."
+            page_note = ""
+        self.total_pages = len(pages)
+        footer = f"-# Updated <t:{int(datetime.datetime.now().timestamp())}:t> · Refresh for current positions{page_note}"
 
         container = discord.ui.Container(accent_colour=V2_ACCENT)
         container.add_item(discord.ui.TextDisplay(header))
@@ -437,6 +444,12 @@ class RouteLayout(discord.ui.LayoutView):
         select = discord.ui.Select(placeholder="Filter by destination", options=[discord.SelectOption(label="All destinations", value="__all__", default=destination is None)] + [discord.SelectOption(label=d[:100], value=d, default=d == destination) for d in destinations])
         select.callback = self.destination_changed
         container.add_item(discord.ui.ActionRow(select))
+        if self.total_pages > 1:
+            prev_button = discord.ui.Button(label="◀ Previous", style=discord.ButtonStyle.secondary, disabled=self.page == 0)
+            prev_button.callback = self.prev_page
+            next_button = discord.ui.Button(label="Next ▶", style=discord.ButtonStyle.secondary, disabled=self.page >= self.total_pages - 1)
+            next_button.callback = self.next_page
+            container.add_item(discord.ui.ActionRow(prev_button, next_button))
         refresh = discord.ui.Button(label="🔄 Refresh", style=discord.ButtonStyle.success)
         refresh.callback = self.refresh_clicked
         container.add_item(discord.ui.ActionRow(refresh))
@@ -446,10 +459,16 @@ class RouteLayout(discord.ui.LayoutView):
         value = interaction.data["values"][0]
         await interaction.response.edit_message(view=RouteLayout(self.route, self.vehicles, self.stations, self.alerts, None if value == "__all__" else value))
 
+    async def prev_page(self, interaction):
+        await interaction.response.edit_message(view=RouteLayout(self.route, self.vehicles, self.stations, self.alerts, self.destination, self.page - 1))
+
+    async def next_page(self, interaction):
+        await interaction.response.edit_message(view=RouteLayout(self.route, self.vehicles, self.stations, self.alerts, self.destination, self.page + 1))
+
     async def refresh_clicked(self, interaction):
         await interaction.response.defer()
         vehicles, alerts = await get_route_data(self.route)
-        await interaction.edit_original_response(view=RouteLayout(self.route, vehicles, self.stations, alerts, self.destination))
+        await interaction.edit_original_response(view=RouteLayout(self.route, vehicles, self.stations, alerts, self.destination, self.page))
 
 
 def station_embed(stop_id, name, buses):
