@@ -8,11 +8,11 @@ but not in embed titles or footers.
 import re
 
 SERVICE_TYPES = {
-    "local":   {"label": "Local",              "emoji": "🟢"},
-    "limited": {"label": "Limited",            "emoji": "🟡"},
-    "sbs":     {"label": "Select Bus Service", "emoji": "🔵"},
-    "express": {"label": "Express",            "emoji": "🟥"},
-    "rush":    {"label": "Rush",               "emoji": "🟣"},
+    "local":   {"label": "Local",              "emoji": "<:local:1551205844400472186>"},
+    "limited": {"label": "Limited",            "emoji": "<:limited:1551205843582586921>"},
+    "sbs":     {"label": "Select Bus Service", "emoji": "<:selectbusservice:1551205846027866213>"},
+    "express": {"label": "Express",            "emoji": "<:express:1551205842941124618>"},
+    "rush":    {"label": "Rush",               "emoji": "<:rush:1551205845461901363>"},
 }
 
 # BM1, BxM1, QM5, SIM1C, X27, ...
