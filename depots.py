@@ -1,4 +1,4 @@
-"""Depot lookup for NYCT / MaBSTOA buses, by fleet number.
+"""Depot lookup for NYCT / MaBSTOA / MTA Bus Company buses, by fleet number.
 
 The Bus Time feed doesn't say which depot a bus belongs to, so this is a
 hand-built table from the MTA New York City Bus Roster
@@ -6,9 +6,12 @@ hand-built table from the MTA New York City Bus Roster
 Buses do get moved between depots -- update the "buses" strings when they do.
 
 * Custom emojis: name each emoji after its depot key (casey_stengel, gun_hill,
-  jamaica, ...), optionally with a "depot_" prefix or "_depot" suffix. The bot
-  finds them by name at startup, so no IDs are needed. A depot's "emoji" value
-  below is only the fallback (or set it to "<:name:id>" to force one).
+  jamaica, college_point, ...), optionally with a "depot_" prefix or "_depot"
+  suffix. The bot finds them by name at startup, so no IDs are needed. A
+  depot's "emoji" value below is only the fallback (or set it to
+  "<:name:id>" to force one). The MTA Bus Company depots added below don't
+  have custom emojis uploaded yet, so they fall back to a plain bus emoji --
+  upload one named after the depot's key and it'll be picked up automatically.
 * Meredith (closed Jan 2025) is left out; its buses moved to Castleton,
   Charleston and Yukon.
 * A few numbers appear under two depots on the source site. Those are left
@@ -248,6 +251,76 @@ DEPOTS = {
             "2749-2754, 2757, 2760-2765, 2781, 2789, 1614-1625, 1587-1606, 1650-1669, 1710-1729, 1751-1760"
         ),
     },
+
+    # ---- MTA Bus Company depots (former private franchises) ----
+    # Same roster site, "Former Private Bus Companies" section, pages dated Apr-Sep 2026.
+    # Fleet numbers share one system-wide space with NYCT/MaBSTOA above, so a number is
+    # only ever assigned to one depot overall -- overlaps between an MTABC depot and an
+    # NYCT one just mean the roster site has that number down for both; they fall into
+    # CONFLICTS and get skipped, same as any other conflicting number.
+    "baisley_park": {
+        "name": "Baisley Park",
+        "emoji": "<:baisley:1551199556509769829>",
+        "buses": (
+            "8964-9009, 5364, 5374, 5383-5384, 5386-5438, 6035, 6039, 6041, 6085, 1527-1534"
+        ),
+    },
+    "college_point": {
+        "name": "College Point",
+        "emoji": "<:collegepoint:1551199560603279431>",
+        "buses": (
+            "185-238, 330-331, 334-346, 352-353, 528, 530-544, 546-565, 567-569, 589, 592-600, "
+            "602-628, 630-641, 643-658, 3248, 3259, 3261, 3271, 3274, 3281-3282, 3291-3292, 3304, "
+            "3310, 3316, 3332-3333, 3350, 3363, 3386, 3388, 3390-3391, 3399, 3408, 3459, 3464, "
+            "2261-2264, 2266-2268, 2276-2279, 2281, 2284-2285, 2292, 2298, 1300-1337, 1382, "
+            "1338-1348, 1351, 1349-1350, 1352-1368, 1381, 1761-1766, 1767-1810"
+        ),
+    },
+    "eastchester": {
+        "name": "Eastchester",
+        "emoji": "<:eastchester:1551199561626951711>",
+        "buses": (
+            "9309-9311, 9354-9387, 3275, 3309, 3311, 3318, 3338, 3343, 3347, 3369, 3402, 3407, "
+            "3426, 3434, 3436, 4306, 2251-2260, 2269-2275, 2282, 2286-2287, 1385-1405, 1406-1422, "
+            "1837-1865, 1869-1873"
+        ),
+    },
+    "far_rockaway_jfk": {
+        "name": "Far Rockaway/JFK",
+        "emoji": "<:farrockaway:1551199563887415418>",
+        "buses": (
+            "9010-9180, 9184-9187, 9200, 9307, 9312-9353, 5365-5369, 5370, 5372-5373, 5375-5382, "
+            "5385, 6035-6037, 6115, 6234-6237, 6238-6259, 1430-1449, 1456, 1495-1497, 1506, "
+            "1423-1429, 1369-1380, 1498, 1500, 1888-1903"
+        ),
+    },
+    "laguardia": {
+        "name": "LaGuardia",
+        "emoji": "<:laguardia:1551199573710737478>",
+        "buses": (
+            "7158, 7374-7375, 7438-7483, 9181-9183, 9188-9271, 9272-9306, 9308, 6068, 6070, 6072, "
+            "6074, 6076, 6078, 6080, 6082, 6084, 6086, 6088, 6090, 6092, 6260-6286, 1383-1384, "
+            "1492-1494, 1489-1491, 1535-1545, 1546-1556"
+        ),
+    },
+    "spring_creek": {
+        "name": "Spring Creek",
+        "emoji": "<:springcreek:1551199580027363343>",
+        "buses": (
+            "332-333, 347-350, 491-527, 529, 545, 566, 570-588, 590-591, 601, 629, 3341-3342, "
+            "2195-2197, 2217, 2223-2224, 2229-2250, 2198-2202, 2204-2206, 2208-2209, 1499, "
+            "1503-1505, 1507-1509, 1501-1502, 1510-1526, 1932-1952"
+        ),
+    },
+    "yonkers": {
+        "name": "Yonkers",
+        "emoji": "<:yonkers:1551199584599146526>",
+        "buses": (
+            "3264, 3323, 3326, 3329, 3335, 3352, 3355-3356, 3371, 3378-3379, 3383-3385, 3389, "
+            "3396, 3411-3412, 3447, 2288-2289, 2291, 2294, 2296-2297, 2300-2303, 1450-1455, "
+            "1457-1472, 1473-1488, 1971-1988"
+        ),
+    },
 }
 
 
@@ -273,12 +346,12 @@ for _key, _depot in DEPOTS.items():
 BY_NUMBER = {n: keys[0] for n, keys in _owners.items() if len(keys) == 1}
 CONFLICTS = {n: keys for n, keys in _owners.items() if len(keys) > 1}
 
-_NYCT_REF = re.compile(r"^MTA[ _]NYCT_(\d+)$", re.IGNORECASE)
+_FLEET_REF = re.compile(r"^(?:MTA[ _]NYCT_|MTABC_)(\d+)$", re.IGNORECASE)
 
 
 def fleet_number(vehicle_ref):
-    """'MTA NYCT_8445' -> 8445; anything else (MTABC_..., empty) -> None."""
-    match = _NYCT_REF.match(str(vehicle_ref or "").strip())
+    """'MTA NYCT_8445' -> 8445, 'MTABC_195' -> 195; anything else (empty) -> None."""
+    match = _FLEET_REF.match(str(vehicle_ref or "").strip())
     return int(match.group(1)) if match else None
 
 
