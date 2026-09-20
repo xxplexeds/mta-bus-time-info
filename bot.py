@@ -66,26 +66,68 @@ async def download(session, url):
         return await response.read()
 
 
+FEED_ERRORS = (aiohttp.ClientError, asyncio.TimeoutError, OSError, KeyError, zipfile.BadZipFile)
+
+
+def _find_stop_name(data, stop_id):
+    # Blocking work: always call through asyncio.to_thread.
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        for row in csv_rows(archive, "stops.txt"):
+            if (row.get("stop_id") or "").strip() == stop_id:
+                name = (row.get("stop_name") or "").strip()
+                if name:
+                    return name
+    return None
+
+
+def _find_route_stops(data, route):
+    # Blocking work: always call through asyncio.to_thread.
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        names = {}
+        for row in csv_rows(archive, "stops.txt"):
+            stop_id, name = (row.get("stop_id") or "").strip(), (row.get("stop_name") or "").strip()
+            if stop_id and name:
+                names[stop_id] = name
+        trip_id = None
+        for row in csv_rows(archive, "trips.txt"):
+            if (row.get("route_id") or "").strip().upper() == route:
+                trip_id = (row.get("trip_id") or "").strip()
+                if trip_id:
+                    break
+        if not trip_id:
+            return []
+        ordered = []
+        for row in csv_rows(archive, "stop_times.txt"):
+            if (row.get("trip_id") or "").strip() == trip_id:
+                try:
+                    sequence = int(row.get("stop_sequence") or 0)
+                except ValueError:
+                    sequence = 0
+                stop_id = (row.get("stop_id") or "").strip()
+                if stop_id in names:
+                    ordered.append((sequence, names[stop_id]))
+        return [name for _, name in sorted(ordered)]
+
+
 async def get_stop_name(stop_id: str):
     if stop_id in _stop_cache:
         _stop_cache.move_to_end(stop_id)
         return _stop_cache[stop_id]
     async with _gtfs_lock:
+        if stop_id in _stop_cache:
+            return _stop_cache[stop_id]
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             for url in ALL_FEEDS:
                 try:
                     data = await download(session, url)
-                    with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                        for row in csv_rows(archive, "stops.txt"):
-                            if (row.get("stop_id") or "").strip() == stop_id:
-                                name = (row.get("stop_name") or "").strip()
-                                if name:
-                                    _stop_cache[stop_id] = name
-                                    while len(_stop_cache) > 256:
-                                        _stop_cache.popitem(last=False)
-                                    return name
-                except (aiohttp.ClientError, OSError, KeyError, zipfile.BadZipFile):
+                    name = await asyncio.to_thread(_find_stop_name, data, stop_id)
+                except FEED_ERRORS:
                     continue
+                if name:
+                    _stop_cache[stop_id] = name
+                    while len(_stop_cache) > 256:
+                        _stop_cache.popitem(last=False)
+                    return name
     return None
 
 
@@ -101,38 +143,14 @@ async def get_route_stops(route: str):
             for url in feed_urls(route):
                 try:
                     data = await download(session, url)
-                    with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                        names = {}
-                        for row in csv_rows(archive, "stops.txt"):
-                            stop_id, name = (row.get("stop_id") or "").strip(), (row.get("stop_name") or "").strip()
-                            if stop_id and name:
-                                names[stop_id] = name
-                        trip_id = None
-                        for row in csv_rows(archive, "trips.txt"):
-                            if (row.get("route_id") or "").strip().upper() == route:
-                                trip_id = (row.get("trip_id") or "").strip()
-                                if trip_id:
-                                    break
-                        if not trip_id:
-                            continue
-                        ordered = []
-                        for row in csv_rows(archive, "stop_times.txt"):
-                            if (row.get("trip_id") or "").strip() == trip_id:
-                                try:
-                                    sequence = int(row.get("stop_sequence") or 0)
-                                except ValueError:
-                                    sequence = 0
-                                stop_id = (row.get("stop_id") or "").strip()
-                                if stop_id in names:
-                                    ordered.append((sequence, names[stop_id]))
-                        stops = [name for _, name in sorted(ordered)]
-                        if stops:
-                            _route_cache[route] = stops
-                            while len(_route_cache) > 8:
-                                _route_cache.popitem(last=False)
-                            return stops
-                except (aiohttp.ClientError, OSError, KeyError, zipfile.BadZipFile):
+                    stops = await asyncio.to_thread(_find_route_stops, data, route)
+                except FEED_ERRORS:
                     continue
+                if stops:
+                    _route_cache[route] = stops
+                    while len(_route_cache) > 8:
+                        _route_cache.popitem(last=False)
+                    return stops
     return []
 
 
