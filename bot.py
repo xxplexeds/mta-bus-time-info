@@ -1,14 +1,30 @@
 import os
+import datetime
+from threading import Thread
+
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-import datetime
-import aiohttp
 from dotenv import load_dotenv
+from flask import Flask
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 MTA_KEY = os.getenv("MTA_API_KEY")
+
+# Render Web Services expect the process to listen on the PORT environment variable.
+health_app = Flask(__name__)
+
+
+@health_app.get("/")
+def health_check():
+    return "MTA Bus Time bot is running", 200
+
+
+def run_health_server():
+    port = int(os.getenv("PORT", "10000"))
+    health_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 
 def _normalize_stop_id(stop_id: str) -> str:
@@ -107,12 +123,11 @@ def create_bus_embed_v2(stop_id: str, bus_data: list) -> discord.Embed:
     embed = discord.Embed(
         title="🚌 Real-Time Bus Arrivals",
         description=f"Live tracking for Stop ID: **{stop_id}**\n\u200b",
-        color=0x0039A6  # MTA Blue
+        color=0x0039A6,  # MTA Blue
     )
 
     if bus_data:
         for bus in bus_data:
-            # Displays the route number prominently, followed by its destination type
             embed.add_field(
                 name=f"📌 Route **{bus['route']}**",
                 value=f"**Destination:** {bus['destination']}\n**Status:** {bus['status']} ({bus['distance']})\n\u200b",
@@ -169,7 +184,9 @@ async def bus(interaction: discord.Interaction, stop_id: str):
     await interaction.followup.send(embed=embed, view=BusRefreshView(stop_id))
 
 
-if TOKEN:
-    bot.run(TOKEN)
-else:
-    print("Error: DISCORD_TOKEN environment variable not found.")
+if __name__ == "__main__":
+    if not TOKEN:
+        print("Error: DISCORD_TOKEN environment variable not found.")
+    else:
+        Thread(target=run_health_server, daemon=True).start()
+        bot.run(TOKEN)
