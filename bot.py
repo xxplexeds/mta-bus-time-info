@@ -17,18 +17,12 @@ from flask import Flask
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 MTA_KEY = os.getenv("MTA_API_KEY")
+
 health_app = Flask(__name__)
-
-
-@health_app.get("/")
-def health_check():
-    return "MTA Bus Time bot is running", 200
-
-
-def run_health_server():
-    health_app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")), use_reloader=False)
-
-
+ROUTE_LINE = "┃"
+CHECKPOINT = "┣"
+CURRENT_BUS = "🚌"
+ENDPOINT = "┗"
 FEEDS = {
     "BX": "https://web.mta.info/developers/data/nyct/bus/google_transit_bronx.zip",
     "B": "https://web.mta.info/developers/data/nyct/bus/google_transit_brooklyn.zip",
@@ -40,17 +34,26 @@ FEEDS = {
 ALL_FEEDS = tuple(dict.fromkeys(FEEDS.values()))
 _stop_cache: OrderedDict[str, str] = OrderedDict()
 _route_cache: OrderedDict[str, list[str]] = OrderedDict()
-_cache_lock = asyncio.Lock()
+_gtfs_lock = asyncio.Lock()
 
 
-def feed_urls(route):
+@health_app.get("/")
+def health_check():
+    return "MTA Bus Time bot is running", 200
+
+
+def run_health_server():
+    health_app.run(host="0.0.0.0", port=int(os.getenv("PORT", "10000")), use_reloader=False)
+
+
+def feed_urls(route: str):
     route = route.upper()
     prefix = "BX" if route.startswith("BX") else "SIM" if route.startswith("SIM") else route[:1]
     preferred = FEEDS.get(prefix)
-    return ([preferred] if preferred else []) + [url for url in ALL_FEEDS if url != preferred]
+    return ([preferred] if preferred else []) + [u for u in ALL_FEEDS if u != preferred]
 
 
-def rows(archive, filename):
+def csv_rows(archive, filename):
     with archive.open(filename) as raw:
         yield from csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8-sig", newline=""))
 
@@ -61,18 +64,17 @@ async def download(session, url):
         return await response.read()
 
 
-async def get_stop_name(stop_id):
+async def get_stop_name(stop_id: str):
     if stop_id in _stop_cache:
+        _stop_cache.move_to_end(stop_id)
         return _stop_cache[stop_id]
-    async with _cache_lock:
-        if stop_id in _stop_cache:
-            return _stop_cache[stop_id]
+    async with _gtfs_lock:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
             for url in ALL_FEEDS:
                 try:
                     data = await download(session, url)
                     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                        for row in rows(archive, "stops.txt"):
+                        for row in csv_rows(archive, "stops.txt"):
                             if (row.get("stop_id") or "").strip() == stop_id:
                                 name = (row.get("stop_name") or "").strip()
                                 if name:
@@ -85,12 +87,12 @@ async def get_stop_name(stop_id):
     return None
 
 
-async def get_route_stops(route):
+async def get_route_stops(route: str):
     route = route.upper()
     if route in _route_cache:
         _route_cache.move_to_end(route)
         return _route_cache[route]
-    async with _cache_lock:
+    async with _gtfs_lock:
         if route in _route_cache:
             return _route_cache[route]
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as session:
@@ -99,13 +101,12 @@ async def get_route_stops(route):
                     data = await download(session, url)
                     with zipfile.ZipFile(io.BytesIO(data)) as archive:
                         names = {}
-                        for row in rows(archive, "stops.txt"):
-                            stop_id = (row.get("stop_id") or "").strip()
-                            name = (row.get("stop_name") or "").strip()
+                        for row in csv_rows(archive, "stops.txt"):
+                            stop_id, name = (row.get("stop_id") or "").strip(), (row.get("stop_name") or "").strip()
                             if stop_id and name:
                                 names[stop_id] = name
                         trip_id = None
-                        for row in rows(archive, "trips.txt"):
+                        for row in csv_rows(archive, "trips.txt"):
                             if (row.get("route_id") or "").strip().upper() == route:
                                 trip_id = (row.get("trip_id") or "").strip()
                                 if trip_id:
@@ -113,7 +114,7 @@ async def get_route_stops(route):
                         if not trip_id:
                             continue
                         ordered = []
-                        for row in rows(archive, "stop_times.txt"):
+                        for row in csv_rows(archive, "stop_times.txt"):
                             if (row.get("trip_id") or "").strip() == trip_id:
                                 try:
                                     sequence = int(row.get("stop_sequence") or 0)
@@ -133,16 +134,16 @@ async def get_route_stops(route):
     return []
 
 
-def norm(value):
+def normalize(value):
     return " ".join(str(value or "").lower().replace("/", " ").split())
 
 
 def matches(route_stop, live_stop):
-    left, right = norm(route_stop), norm(live_stop)
+    left, right = normalize(route_stop), normalize(live_stop)
     return left == right or left in right or right in left
 
 
-def arrival_status(call):
+def status(call):
     expected = call.get("ExpectedArrivalTime")
     if expected:
         try:
@@ -175,8 +176,7 @@ async def get_stop_times(stop_id):
         for visit in visits:
             journey = visit.get("MonitoredVehicleJourney", {})
             if journey:
-                call = journey.get("MonitoredCall", {})
-                result.append({"route": journey.get("PublishedLineName") or journey.get("LineRef") or "Unknown", "destination": journey.get("DestinationName") or "Unknown destination", "status": arrival_status(call)})
+                result.append({"route": str(journey.get("PublishedLineName") or journey.get("LineRef") or "Unknown"), "destination": str(journey.get("DestinationName") or "Unknown destination"), "status": status(journey.get("MonitoredCall", {}))})
     return result
 
 
@@ -203,37 +203,28 @@ async def get_route_buses(route):
             journey = activity.get("MonitoredVehicleJourney", {})
             call = journey.get("MonitoredCall", {}) or {}
             if journey:
-                result.append({
-                    "vehicle": str(journey.get("VehicleRef") or "bus"),
-                    "destination": str(journey.get("DestinationName") or "Destination unavailable"),
-                    "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable"),
-                    "status": arrival_status(call),
-                })
+                result.append({"vehicle": str(journey.get("VehicleRef") or "bus"), "destination": str(journey.get("DestinationName") or "Destination unavailable"), "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable"), "status": status(call)})
     return result
 
 
 def route_embed(route, vehicles, stations, destination=None, selected=None):
     shown = [v for v in vehicles if (not destination or v["destination"] == destination) and (not selected or matches(selected, v["stop"]))]
-    title_destination = destination or (shown[0]["destination"] if len({v["destination"] for v in shown}) == 1 and shown else "Bus Service")
-    embed = discord.Embed(title=f"🚌 {route} — {title_destination}", color=0x0039A6)
+    destination_title = destination or (shown[0]["destination"] if len({v["destination"] for v in shown}) == 1 and shown else "Bus Service")
+    embed = discord.Embed(title=f"🚌 {route} — {destination_title}", color=0x0039A6)
     if selected:
-        embed.description = f"Station filter: **{selected}**\n\n" + ("\n\n".join(f"🚌 **{v['vehicle']}** — 📍 {v['stop']}\n➡️ {v['destination']} ({v['status']})" for v in shown[:15]) or "No live buses were found for this station.")
+        text = "\n\n".join(f"{CURRENT_BUS} **{v['vehicle']}** — 📍 {v['stop']}\n➡️ {v['destination']} ({v['status']})" for v in shown[:15])
+        embed.description = f"Station filter: **{selected}**\n\n{text or 'No live buses were found for this station.'}"
     elif stations:
-        # Always render stops in travel order: oldest/recently served stops are
-        # above the bus, and upcoming stops continue downward. Never reverse the
-        # list just because a destination or direction is selected.
         current_indexes = [i for i, stop in enumerate(stations) if any(matches(stop, v["stop"]) for v in shown)]
         current = min(current_indexes) if current_indexes else None
         lines = []
         for index, stop in enumerate(stations):
             at_stop = [v for v in shown if matches(stop, v["stop"])]
+            marker = CURRENT_BUS if at_stop else (CHECKPOINT if current is not None and index < current else ENDPOINT if index == len(stations) - 1 else ROUTE_LINE)
+            details = ""
             if at_stop:
-                ids = ", ".join(v["vehicle"] for v in at_stop[:3])
-                lines.append(f"🚌 **{index + 1}. {stop} — {at_stop[0]['status']}** ({ids})")
-            elif current is not None and index < current:
-                lines.append(f"~~{index + 1}. {stop}~~")
-            else:
-                lines.append(f"{index + 1}. {stop}")
+                details = f" — {at_stop[0]['status']} ({', '.join(v['vehicle'] for v in at_stop[:3])})"
+            lines.append(f"{marker} **{index + 1}. {stop}**{details}" if at_stop else f"{marker} {index + 1}. {stop}")
         text = "\n".join(lines)
         embed.description = text if len(text) <= 3900 else text[:3850].rsplit("\n", 1)[0] + "\n… more stations available with the station filter."
     else:
@@ -325,7 +316,7 @@ bot = BusBot()
 @app_commands.describe(station_number="The MTA bus stop number, for example 500003")
 async def station(interaction: discord.Interaction, station_number: str):
     await interaction.response.defer()
-    stop_id = norm(station_number)
+    stop_id = normalize(station_number)
     try:
         name, buses = await asyncio.gather(get_stop_name(stop_id), get_stop_times(stop_id))
     except RuntimeError as exc:
@@ -338,7 +329,7 @@ async def station(interaction: discord.Interaction, station_number: str):
 @app_commands.describe(bus="The route, for example M15, Q44, or B44")
 async def bus(interaction: discord.Interaction, bus: str):
     await interaction.response.defer()
-    route = norm(bus).upper()
+    route = normalize(bus).upper()
     try:
         vehicles, stations = await asyncio.gather(get_route_buses(route), get_route_stops(route))
     except RuntimeError as exc:
