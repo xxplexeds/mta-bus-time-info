@@ -395,7 +395,14 @@ async def refresh_depot_emojis():
         print("Emoji names I can see: " + ", ".join(sorted(e.name for e in found)[:60]))
 
 
+def everywhere(func):
+    """Let a command work in servers, DMs and group DMs, including when the app is installed to a user account."""
+    func = app_commands.allowed_installs(guilds=True, users=True)(func)
+    return app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)(func)
+
+
 @bot.tree.command(name="station", description="Get real-time bus arrival times for an MTA bus stop")
+@everywhere
 @app_commands.describe(station_number="The MTA bus stop number, for example 500003")
 async def station(interaction: discord.Interaction, station_number: str):
     await interaction.response.defer()
@@ -420,12 +427,14 @@ async def station_autocomplete(interaction: discord.Interaction, current: str):
 
 
 @bot.tree.command(name="saved_stations", description="See your saved bus stops and open their live times")
+@everywhere
 async def saved_stations(interaction: discord.Interaction):
     stops = await asyncio.to_thread(presets.pinned, interaction.user.id)
     await interaction.response.send_message(**saved_payload(stops), ephemeral=True)
 
 
 @bot.tree.command(name="bus", description="Show live buses operating on an MTA route")
+@everywhere
 @app_commands.describe(bus="The route, for example M15, Q44, or B44")
 async def bus(interaction: discord.Interaction, bus: str):
     await interaction.response.defer()
