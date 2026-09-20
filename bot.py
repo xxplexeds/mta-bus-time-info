@@ -37,6 +37,12 @@ FEEDS = {
     "Q": "https://web.mta.info/developers/data/nyct/bus/google_transit_queens.zip",
     "S": "https://web.mta.info/developers/data/nyct/bus/google_transit_staten_island.zip",
     "SIM": "https://web.mta.info/developers/data/nyct/bus/google_transit_staten_island.zip",
+    # MTA Bus Company: a separate operator (former private franchises), covers B100/B103,
+    # Bx23, the BxM express routes, and a handful of Queens routes (e.g. Q50) that the
+    # regular borough zips above don't include. No single-letter prefix maps to it, so it
+    # isn't picked as anyone's "preferred" feed -- it just rides along in ALL_FEEDS below
+    # as a fallback every route falls through to if its usual borough feed comes up empty.
+    "BUSCO": "https://web.mta.info/developers/data/busco/google_transit.zip",
 }
 ALL_FEEDS = tuple(dict.fromkeys(FEEDS.values()))
 _stop_cache: OrderedDict[str, str] = OrderedDict()
