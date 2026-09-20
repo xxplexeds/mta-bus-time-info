@@ -23,6 +23,37 @@ GLYPHS = {
     "gap": "┇",     # a hidden stretch of stops
 }
 G = GLYPHS
+_DEFAULT_GLYPHS = dict(GLYPHS)
+
+# Emoji name -> the GLYPHS entries it replaces. Upload emojis with these names (server or
+# application emojis) and the bot swaps them in at startup; anything missing keeps its default.
+GLYPH_EMOJIS = {
+    "route_start": ("start",),
+    "route_stop": ("stop", "passed"),
+    "route_end": ("end",),
+    "route_line": ("line",),
+    "route_gap": ("gap",),
+    "route_bus": ("bus",),      # the marker on a stop that has a bus at it
+    "route_arrow": ("arrow",),  # under the bus: direction of travel
+    "route_badge": ("badge",),  # small bus icon in front of the route number
+}
+
+
+def set_glyph_emojis(emojis):
+    """Swap in custom emojis by name. Returns the emoji names that weren't found."""
+    by_name = {}
+    for emoji in emojis:
+        by_name.setdefault(emoji.name.lower(), emoji)
+    GLYPHS.update(_DEFAULT_GLYPHS)
+    missing = []
+    for name, keys in GLYPH_EMOJIS.items():
+        emoji = by_name.get(name)
+        if not emoji:
+            missing.append(name)
+            continue
+        for key in keys:
+            GLYPHS[key] = str(emoji)
+    return missing
 
 _KEEP_UPPER = {
     "JFK", "LGA", "LIRR", "QBCC", "BQE", "FDR", "NYU", "CUNY", "MTA", "LIC",
@@ -86,8 +117,8 @@ def render_cards(route, vehicles, limit=3500):
     return "\n\n".join(blocks)
 
 
-def _collapse(blocks, keep_run):
-    """Replace the middle of long quiet stretches with one row."""
+def _collapse(blocks, keep):
+    """Shrink long quiet stretches: keep `keep` stops at each end and hide the middle."""
     lines, i = [], 0
     while i < len(blocks):
         if blocks[i]["bus"]:
@@ -98,10 +129,12 @@ def _collapse(blocks, keep_run):
         while j < len(blocks) and not blocks[j]["bus"]:
             j += 1
         run = blocks[i:j]
-        if len(run) > keep_run + 2:
-            lines.extend(run[0]["lines"])
-            lines.append(f"{G['gap']} {len(run) - 2} more stops")
-            lines.extend(run[-1]["lines"])
+        if len(run) > 2 * keep + 2:
+            for block in run[:keep]:
+                lines.extend(block["lines"])
+            lines.append(f"{G['gap']} {len(run) - 2 * keep} more stops")
+            for block in run[-keep:]:
+                lines.extend(block["lines"])
         else:
             for block in run:
                 lines.extend(block["lines"])
@@ -132,8 +165,8 @@ def render_route(route, stations, shown, matches, limit=3800):
         blocks.append({"bus": False, "lines": [f"{glyph} {pretty(stop)}"]})
 
     text = ""
-    for keep_run in (10 ** 6, 10, 6, 4, 3, 2, 1, 0):
-        text = "\n".join(_collapse(blocks, keep_run))
+    for keep in (10 ** 6, 20, 12, 8, 5, 3, 2, 1):
+        text = "\n".join(_collapse(blocks, keep))
         if len(text) <= limit:
             break
     else:
