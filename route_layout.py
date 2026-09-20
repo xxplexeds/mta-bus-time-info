@@ -12,15 +12,15 @@ from depots import depot_badge, fleet_number
 from service_types import emoji as service_emoji, label as service_label
 
 GLYPHS = {
-    "start": "┏",   # first stop of the route
-    "stop": "┣",    # a stop on the line
-    "passed": "┣",  # a stop every bus has already passed (can look different)
-    "end": "┗",     # last stop of the route
-    "line": "┃",    # the line between rows (inside bus cards)
-    "bus": "🚌",    # a stop with a bus at it (replaces the tick)
-    "arrow": "⬇️",  # under the bus: direction of travel
-    "badge": "🚌",  # in front of the route number on a bus card
-    "gap": "┇",     # a hidden stretch of stops
+    "start": "<:route_start:1551236999321616404>",   # first stop of the route
+    "stop": "<:route_stop:1551237000097566742>",    # a stop on the line
+    "passed": "<:route_stop:1551237000097566742>",  # a stop every bus has already passed (can look different)
+    "end": "<:route_end:1551236995949535415>",     # last stop of the route
+    "line": "<:route_line:1551236998302539976>",    # the line between rows (inside bus cards)
+    "bus": "<:route_bus:1551236995261538474>",    # a stop with a bus at it (replaces the tick)
+    "arrow": "<:route_arrow:1551236993655251004>",  # under the bus: direction of travel
+    "badge": "<:route_badge:1551236994355433663>",  # in front of the route number on a bus card
+    "gap": "<:route_gap:1551236997169807541>",     # a hidden stretch of stops
 }
 G = GLYPHS
 _DEFAULT_GLYPHS = dict(GLYPHS)
