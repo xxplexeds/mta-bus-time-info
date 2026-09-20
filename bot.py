@@ -16,7 +16,7 @@ from flask import Flask
 
 from service_types import service_type, badge
 from depots import DEPOTS, depot_badge, set_emojis as set_depot_emojis
-from route_layout import pretty, render_cards, render_route
+from route_layout import pretty, render_cards, render_route, set_glyph_emojis
 import presets
 
 load_dotenv()
@@ -390,6 +390,9 @@ async def refresh_depot_emojis():
         print(f"Could not fetch application emojis: {exc}")
     missing = set_depot_emojis(found)
     print(f"Depot emojis matched: {len(DEPOTS) - len(missing)}/{len(DEPOTS)}")
+    missing_glyphs = set_glyph_emojis(found)
+    if missing_glyphs:
+        print("Route line emojis not found (using text symbols): " + ", ".join(missing_glyphs))
     if missing:
         print("No emoji found for: " + ", ".join(missing))
         print("Emoji names I can see: " + ", ".join(sorted(e.name for e in found)[:60]))
