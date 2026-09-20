@@ -23,6 +23,7 @@ except ImportError:  # an older route_layout.py without name-based emoji lookup:
     def set_glyph_emojis(emojis):
         return []
 import presets
+from service_status import parse_alerts, status_text
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -206,7 +207,8 @@ async def get_stop_times(stop_id):
     return result
 
 
-async def get_route_buses(route):
+async def get_route_data(route):
+    """(vehicles, alerts) from one Bus Time call. alerts is None when the call failed."""
     if not MTA_KEY:
         raise RuntimeError("MTA_API_KEY environment variable not found.")
     try:
@@ -216,7 +218,7 @@ async def get_route_buses(route):
                 response.raise_for_status()
                 payload = await response.json()
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
-        return []
+        return [], None
     deliveries = payload.get("Siri", {}).get("ServiceDelivery", {}).get("VehicleMonitoringDelivery", [])
     if isinstance(deliveries, dict):
         deliveries = [deliveries]
@@ -233,7 +235,15 @@ async def get_route_buses(route):
                 distances = (call.get("Extensions") or {}).get("Distances") or {}
                 proximity = str(distances.get("PresentableDistance") or call.get("ArrivalProximityText") or "")
                 result.append({"proximity": proximity, "vehicle": str(journey.get("VehicleRef") or "bus"), "destination": destination, "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable"), "status": status(call), "service": service_type(journey.get("PublishedLineName") or journey.get("LineRef"), destination)})
-    return result
+    try:
+        alerts = parse_alerts(payload, route)
+    except (AttributeError, TypeError, ValueError, KeyError):
+        alerts = None  # shown as "status unavailable" instead of breaking /bus
+    return result, alerts
+
+
+async def get_route_buses(route):
+    return (await get_route_data(route))[0]
 
 
 def route_embed(route, vehicles, stations, destination=None):
@@ -390,6 +400,52 @@ class SavedLayout(discord.ui.LayoutView):
         await interaction.response.edit_message(view=SavedLayout(stops))
 
 
+class RouteLayout(discord.ui.LayoutView):
+    """/bus as a Components V2 card: header, service status, the stop list with buses, and the controls."""
+
+    def __init__(self, route, vehicles, stations, alerts, destination=None):
+        super().__init__(timeout=120)
+        self.route, self.vehicles, self.stations, self.alerts, self.destination = route, vehicles, stations, alerts, destination
+        shown = [v for v in vehicles if not destination or v["destination"] == destination]
+        title = destination or (shown[0]["destination"] if len({v["destination"] for v in shown}) == 1 and shown else "Bus Service")
+        header = f"## 🚌 {route} — {pretty(title)}\n{badge(service_type(route))}"
+        status_block = status_text(alerts)
+        footer = f"-# Updated <t:{int(datetime.datetime.now().timestamp())}:t> · Refresh for current positions"
+        # Discord allows 4000 characters of text per message: give the stop list whatever the rest leaves
+        limit = max(1200, V2_MAX_TEXT + 100 - len(header) - len(status_block) - len(footer) - 120)
+        if stations:
+            body = render_route(route, stations, shown, matches, limit=limit)
+        else:
+            cards = render_cards(route, shown[:15], limit=min(3500, limit))
+            body = f"No station list was found for this route, so here are the live buses:\n\n{cards}" if cards else "No station list or live buses were found for this route."
+
+        container = discord.ui.Container(accent_colour=V2_ACCENT)
+        container.add_item(discord.ui.TextDisplay(header))
+        container.add_item(discord.ui.TextDisplay(status_block))
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay(body))
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay(footer))
+
+        destinations = sorted({v["destination"] for v in vehicles if v["destination"] != "Destination unavailable"})[:24]
+        select = discord.ui.Select(placeholder="Filter by destination", options=[discord.SelectOption(label="All destinations", value="__all__", default=destination is None)] + [discord.SelectOption(label=d[:100], value=d, default=d == destination) for d in destinations])
+        select.callback = self.destination_changed
+        container.add_item(discord.ui.ActionRow(select))
+        refresh = discord.ui.Button(label="🔄 Refresh", style=discord.ButtonStyle.success)
+        refresh.callback = self.refresh_clicked
+        container.add_item(discord.ui.ActionRow(refresh))
+        self.add_item(container)
+
+    async def destination_changed(self, interaction):
+        value = interaction.data["values"][0]
+        await interaction.response.edit_message(view=RouteLayout(self.route, self.vehicles, self.stations, self.alerts, None if value == "__all__" else value))
+
+    async def refresh_clicked(self, interaction):
+        await interaction.response.defer()
+        vehicles, alerts = await get_route_data(self.route)
+        await interaction.edit_original_response(view=RouteLayout(self.route, vehicles, self.stations, alerts, self.destination))
+
+
 def station_embed(stop_id, name, buses):
     embed = discord.Embed(title="🚌 Real-Time Bus Arrivals", description=f"📍 **{name or 'Unknown stop'}**\nStop ID: **{stop_id}**", color=0x0039A6)
     for bus in buses:
@@ -479,11 +535,11 @@ async def bus(interaction: discord.Interaction, bus: str):
     await interaction.response.defer()
     route = normalize(bus).upper()
     try:
-        vehicles, stations = await asyncio.gather(get_route_buses(route), get_route_stops(route))
+        (vehicles, alerts), stations = await asyncio.gather(get_route_data(route), get_route_stops(route))
     except RuntimeError as exc:
         await interaction.followup.send(str(exc))
         return
-    await interaction.followup.send(embed=route_embed(route, vehicles, stations), view=BusView(route, vehicles, stations))
+    await interaction.followup.send(view=RouteLayout(route, vehicles, stations, alerts))
 
 
 if __name__ == "__main__":
