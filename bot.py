@@ -279,6 +279,8 @@ class StationView(discord.ui.View):
             select = discord.ui.Select(placeholder="Filter by bus", options=[discord.SelectOption(label="All buses", value="__all__", default=route is None)] + [discord.SelectOption(label=r[:100], value=r, default=r == route) for r in routes], row=0)
             select.callback = self.route_changed
             self.add_item(select)
+        if not (stop_name or self.buses):  # nothing to save for an unknown stop
+            self.remove_item(self.save_stop)
 
     def embed(self):
         shown = [b for b in self.buses if not self.route or b["route"] == self.route]
@@ -294,6 +296,62 @@ class StationView(discord.ui.View):
         await interaction.response.defer()
         view = StationView(self.stop_id, self.stop_name, await get_stop_times(self.stop_id), self.route)
         await interaction.edit_original_response(embed=view.embed(), view=view)
+
+    @discord.ui.button(label="⭐ Save Stop", style=discord.ButtonStyle.secondary, row=1)
+    async def save_stop(self, interaction, button):
+        # Saves to whoever clicked, and replies privately so the shared message isn't changed.
+        result = await asyncio.to_thread(presets.pin, interaction.user.id, self.stop_id, self.stop_name)
+        name = self.stop_name or self.stop_id
+        message = {
+            "saved": f"⭐ Saved **{name}**. Open it with /saved_stations, or pick it when you type in /station.",
+            "exists": f"**{name}** is already in your saved stops. Manage them with /saved_stations.",
+            "full": f"You can save up to {presets.MAX_PINNED} stops. Remove one with /saved_stations first.",
+        }.get(result, "Couldn't save that right now, try again in a bit.")
+        await interaction.response.send_message(message, ephemeral=True)
+
+
+def saved_embed(stops):
+    embed = discord.Embed(title="⭐ Saved Stops", color=0x0039A6)
+    if stops:
+        embed.description = "\n".join(f"**{name or 'Unknown stop'}** · Stop ID {stop_id}" for stop_id, name in stops)
+    else:
+        embed.description = "You haven't saved any stops yet. Use **⭐ Save Stop** under a /station result."
+    return embed
+
+
+def saved_payload(stops):
+    payload = {"embed": saved_embed(stops)}
+    if stops:
+        payload["view"] = SavedView(stops)
+    return payload
+
+
+class SavedView(discord.ui.View):
+    def __init__(self, stops):
+        super().__init__(timeout=180)
+        self.names = dict(stops)
+        for placeholder, callback, row in (("Open a saved stop", self.open_stop, 0), ("Remove a saved stop", self.remove_stop, 1)):
+            select = discord.ui.Select(placeholder=placeholder, options=[discord.SelectOption(label=(name or stop_id)[:100], description=f"Stop {stop_id}", value=stop_id) for stop_id, name in stops[:presets.MAX_PINNED]], row=row)
+            select.callback = callback
+            self.add_item(select)
+
+    async def open_stop(self, interaction):
+        stop_id = interaction.data["values"][0]
+        await interaction.response.defer()
+        try:
+            buses = await get_stop_times(stop_id)
+        except RuntimeError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        name = self.names.get(stop_id) or await get_stop_name(stop_id)
+        view = StationView(stop_id, name, buses)
+        await interaction.edit_original_response(embed=view.embed(), view=view)
+
+    async def remove_stop(self, interaction):
+        await asyncio.to_thread(presets.unpin, interaction.user.id, interaction.data["values"][0])
+        payload = saved_payload(await asyncio.to_thread(presets.pinned, interaction.user.id))
+        payload.setdefault("view", None)  # no stops left: clear the dropdowns
+        await interaction.response.edit_message(**payload)
 
 
 def station_embed(stop_id, name, buses):
@@ -354,8 +412,17 @@ async def station(interaction: discord.Interaction, station_number: str):
 
 @station.autocomplete("station_number")
 async def station_autocomplete(interaction: discord.Interaction, current: str):
-    rows = await asyncio.to_thread(presets.recent, interaction.user.id, current)
-    return [app_commands.Choice(name=(f"{name} ({stop_id})" if name else stop_id)[:100], value=stop_id) for stop_id, name in rows]
+    saved = await asyncio.to_thread(presets.pinned, interaction.user.id, current)
+    recents = await asyncio.to_thread(presets.recent, interaction.user.id, current)
+    seen = {stop_id for stop_id, _ in saved}
+    rows = [("⭐ ", s, n) for s, n in saved] + [("", s, n) for s, n in recents if s not in seen]
+    return [app_commands.Choice(name=(f"{star}{name} ({stop_id})" if name else f"{star}{stop_id}")[:100], value=stop_id) for star, stop_id, name in rows[:25]]
+
+
+@bot.tree.command(name="saved_stations", description="See your saved bus stops and open their live times")
+async def saved_stations(interaction: discord.Interaction):
+    stops = await asyncio.to_thread(presets.pinned, interaction.user.id)
+    await interaction.response.send_message(**saved_payload(stops), ephemeral=True)
 
 
 @bot.tree.command(name="bus", description="Show live buses operating on an MTA route")
