@@ -14,18 +14,15 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from flask import Flask
 
-from service_types import service_type, emoji, label, badge
-from depots import depot_badge
+from service_types import service_type, badge
+from depots import DEPOTS, depot_badge, set_emojis as set_depot_emojis
+from route_layout import pretty, render_cards, render_route
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 MTA_KEY = os.getenv("MTA_API_KEY")
 
 health_app = Flask(__name__)
-ROUTE_LINE = "┃"
-CHECKPOINT = "┣"
-CURRENT_BUS = "🚌"
-ENDPOINT = "┗"
 FEEDS = {
     "BX": "https://web.mta.info/developers/data/nyct/bus/google_transit_bronx.zip",
     "B": "https://web.mta.info/developers/data/nyct/bus/google_transit_brooklyn.zip",
@@ -155,11 +152,6 @@ async def get_route_stops(route: str):
     return []
 
 
-def depot_tag(vehicle):
-    tag = depot_badge(vehicle)
-    return f" · {tag}" if tag else ""
-
-
 def normalize(value):
     return " ".join(str(value or "").lower().replace("/", " ").split())
 
@@ -232,35 +224,25 @@ async def get_route_buses(route):
             call = journey.get("MonitoredCall", {}) or {}
             if journey:
                 destination = str(journey.get("DestinationName") or "Destination unavailable")
-                result.append({"vehicle": str(journey.get("VehicleRef") or "bus"), "destination": destination, "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable"), "status": status(call), "service": service_type(journey.get("PublishedLineName") or journey.get("LineRef"), destination)})
+                distances = (call.get("Extensions") or {}).get("Distances") or {}
+                proximity = str(distances.get("PresentableDistance") or call.get("ArrivalProximityText") or "")
+                result.append({"proximity": proximity, "vehicle": str(journey.get("VehicleRef") or "bus"), "destination": destination, "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable"), "status": status(call), "service": service_type(journey.get("PublishedLineName") or journey.get("LineRef"), destination)})
     return result
 
 
 def route_embed(route, vehicles, stations, destination=None, selected=None):
     shown = [v for v in vehicles if (not destination or v["destination"] == destination) and (not selected or matches(selected, v["stop"]))]
     destination_title = destination or (shown[0]["destination"] if len({v["destination"] for v in shown}) == 1 and shown else "Bus Service")
-    embed = discord.Embed(title=f"🚌 {route} — {destination_title}", color=0x0039A6)
+    embed = discord.Embed(title=f"🚌 {route} — {pretty(destination_title)}", color=0x0039A6)
     header = f"{badge(service_type(route))}\n\n"
     if selected:
-        text = "\n\n".join(f"{emoji(v['service'])} **{v['vehicle']}**{depot_tag(v['vehicle'])} — 📍 {v['stop']}\n➡️ {v['destination']} ({v['status']}) • {label(v['service'])}" for v in shown[:15])
-        embed.description = f"{header}Station filter: **{selected}**\n\n{text or 'No live buses were found for this station.'}"
+        cards = render_cards(route, shown[:15]) or "No live buses were found for this station."
+        body = f"Station filter: **{pretty(selected)}**\n\n{cards}"
     elif stations:
-        current_indexes = [i for i, stop in enumerate(stations) if any(matches(stop, v["stop"]) for v in shown)]
-        current = min(current_indexes) if current_indexes else None
-        lines = []
-        for index, stop in enumerate(stations):
-            at_stop = [v for v in shown if matches(stop, v["stop"])]
-            marker = CURRENT_BUS if at_stop else (CHECKPOINT if current is not None and index < current else ENDPOINT if index == len(stations) - 1 else ROUTE_LINE)
-            details = ""
-            if at_stop:
-                bus_ids = ", ".join(f"{emoji(v['service'])} {v['vehicle']}{depot_tag(v['vehicle'])}" for v in at_stop[:3])
-                details = f" — {at_stop[0]['status']} ({bus_ids})"
-            lines.append(f"{marker} **{index + 1}. {stop}**{details}" if at_stop else f"{marker} {index + 1}. {stop}")
-        text = "\n".join(lines)
-        body = text if len(text) <= 3900 else text[:3850].rsplit("\n", 1)[0] + "\n… more stations available with the station filter."
-        embed.description = header + body
+        body = render_route(route, stations, shown, matches)
     else:
-        embed.description = header + "No station list was found for this route."
+        body = "No station list was found for this route."
+    embed.description = header + body
     embed.set_footer(text=f"Updated {datetime.datetime.now().strftime('%I:%M %p')} • Refresh for current positions")
     return embed
 
@@ -342,8 +324,27 @@ class BusBot(commands.Bot):
     async def setup_hook(self):
         await self.tree.sync()
 
+    async def on_ready(self):
+        await refresh_depot_emojis()
+
+    async def on_guild_emojis_update(self, guild, before, after):
+        await refresh_depot_emojis()
+
 
 bot = BusBot()
+
+
+async def refresh_depot_emojis():
+    found = list(bot.emojis)  # emojis from servers the bot is in
+    try:
+        found += await bot.fetch_application_emojis()  # emojis uploaded to the bot itself
+    except Exception as exc:
+        print(f"Could not fetch application emojis: {exc}")
+    missing = set_depot_emojis(found)
+    print(f"Depot emojis matched: {len(DEPOTS) - len(missing)}/{len(DEPOTS)}")
+    if missing:
+        print("No emoji found for: " + ", ".join(missing))
+        print("Emoji names I can see: " + ", ".join(sorted(e.name for e in found)[:60]))
 
 
 @bot.tree.command(name="station", description="Get real-time bus arrival times for an MTA bus stop")
