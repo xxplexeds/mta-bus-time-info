@@ -14,6 +14,8 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from flask import Flask
 
+from service_types import service_type, emoji, label, badge
+
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 MTA_KEY = os.getenv("MTA_API_KEY")
@@ -176,7 +178,9 @@ async def get_stop_times(stop_id):
         for visit in visits:
             journey = visit.get("MonitoredVehicleJourney", {})
             if journey:
-                result.append({"route": str(journey.get("PublishedLineName") or journey.get("LineRef") or "Unknown"), "destination": str(journey.get("DestinationName") or "Unknown destination"), "status": status(journey.get("MonitoredCall", {}))})
+                route_name = str(journey.get("PublishedLineName") or journey.get("LineRef") or "Unknown")
+                destination = str(journey.get("DestinationName") or "Unknown destination")
+                result.append({"route": route_name, "destination": destination, "status": status(journey.get("MonitoredCall", {})), "service": service_type(route_name, destination)})
     return result
 
 
@@ -203,7 +207,8 @@ async def get_route_buses(route):
             journey = activity.get("MonitoredVehicleJourney", {})
             call = journey.get("MonitoredCall", {}) or {}
             if journey:
-                result.append({"vehicle": str(journey.get("VehicleRef") or "bus"), "destination": str(journey.get("DestinationName") or "Destination unavailable"), "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable"), "status": status(call)})
+                destination = str(journey.get("DestinationName") or "Destination unavailable")
+                result.append({"vehicle": str(journey.get("VehicleRef") or "bus"), "destination": destination, "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable"), "status": status(call), "service": service_type(journey.get("PublishedLineName") or journey.get("LineRef"), destination)})
     return result
 
 
@@ -211,9 +216,10 @@ def route_embed(route, vehicles, stations, destination=None, selected=None):
     shown = [v for v in vehicles if (not destination or v["destination"] == destination) and (not selected or matches(selected, v["stop"]))]
     destination_title = destination or (shown[0]["destination"] if len({v["destination"] for v in shown}) == 1 and shown else "Bus Service")
     embed = discord.Embed(title=f"🚌 {route} — {destination_title}", color=0x0039A6)
+    header = f"{badge(service_type(route))}\n\n"
     if selected:
-        text = "\n\n".join(f"{CURRENT_BUS} **{v['vehicle']}** — 📍 {v['stop']}\n➡️ {v['destination']} ({v['status']})" for v in shown[:15])
-        embed.description = f"Station filter: **{selected}**\n\n{text or 'No live buses were found for this station.'}"
+        text = "\n\n".join(f"{emoji(v['service'])} **{v['vehicle']}** — 📍 {v['stop']}\n➡️ {v['destination']} ({v['status']}) • {label(v['service'])}" for v in shown[:15])
+        embed.description = f"{header}Station filter: **{selected}**\n\n{text or 'No live buses were found for this station.'}"
     elif stations:
         current_indexes = [i for i, stop in enumerate(stations) if any(matches(stop, v["stop"]) for v in shown)]
         current = min(current_indexes) if current_indexes else None
@@ -223,12 +229,14 @@ def route_embed(route, vehicles, stations, destination=None, selected=None):
             marker = CURRENT_BUS if at_stop else (CHECKPOINT if current is not None and index < current else ENDPOINT if index == len(stations) - 1 else ROUTE_LINE)
             details = ""
             if at_stop:
-                details = f" — {at_stop[0]['status']} ({', '.join(v['vehicle'] for v in at_stop[:3])})"
+                bus_ids = ", ".join(f"{emoji(v['service'])} {v['vehicle']}" for v in at_stop[:3])
+                details = f" — {at_stop[0]['status']} ({bus_ids})"
             lines.append(f"{marker} **{index + 1}. {stop}**{details}" if at_stop else f"{marker} {index + 1}. {stop}")
         text = "\n".join(lines)
-        embed.description = text if len(text) <= 3900 else text[:3850].rsplit("\n", 1)[0] + "\n… more stations available with the station filter."
+        body = text if len(text) <= 3900 else text[:3850].rsplit("\n", 1)[0] + "\n… more stations available with the station filter."
+        embed.description = header + body
     else:
-        embed.description = "No station list was found for this route."
+        embed.description = header + "No station list was found for this route."
     embed.set_footer(text=f"Updated {datetime.datetime.now().strftime('%I:%M %p')} • Refresh for current positions")
     return embed
 
@@ -295,7 +303,7 @@ class StationView(discord.ui.View):
 def station_embed(stop_id, name, buses):
     embed = discord.Embed(title="🚌 Real-Time Bus Arrivals", description=f"📍 **{name or 'Unknown stop'}**\nStop ID: **{stop_id}**", color=0x0039A6)
     for bus in buses:
-        embed.add_field(name=f"📌 Route **{bus['route']}**", value=f"**Destination:** {bus['destination']}\n**Status:** {bus['status']}", inline=False)
+        embed.add_field(name=f"📌 Route **{bus['route']}**", value=f"**Service:** {badge(bus['service'])}\n**Destination:** {bus['destination']}\n**Status:** {bus['status']}", inline=False)
     if not buses:
         embed.add_field(name="⚠️ No Services", value="No upcoming buses detected for this stop.", inline=False)
     return embed
