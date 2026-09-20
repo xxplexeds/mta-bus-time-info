@@ -17,6 +17,7 @@ from flask import Flask
 from service_types import service_type, badge
 from depots import DEPOTS, depot_badge, set_emojis as set_depot_emojis
 from route_layout import pretty, render_cards, render_route
+import presets
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -347,6 +348,14 @@ async def station(interaction: discord.Interaction, station_number: str):
         await interaction.followup.send(str(exc))
         return
     await interaction.followup.send(embed=station_embed(stop_id, name, buses), view=StationView(stop_id, name, buses))
+    if name or buses:  # only remember stops that turned out to be real
+        await asyncio.to_thread(presets.save, interaction.user.id, stop_id, name)
+
+
+@station.autocomplete("station_number")
+async def station_autocomplete(interaction: discord.Interaction, current: str):
+    rows = await asyncio.to_thread(presets.recent, interaction.user.id, current)
+    return [app_commands.Choice(name=(f"{name} ({stop_id})" if name else stop_id)[:100], value=stop_id) for stop_id, name in rows]
 
 
 @bot.tree.command(name="bus", description="Show live buses operating on an MTA route")
