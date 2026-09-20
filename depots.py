@@ -5,7 +5,10 @@ hand-built table from the MTA New York City Bus Roster
 (sites.google.com/site/mtanewyorkcitybusroster), pages dated Mar-Sep 2026.
 Buses do get moved between depots -- update the "buses" strings when they do.
 
-* To use custom Discord emojis, change each "emoji" value to "<:name:id>".
+* Custom emojis: name each emoji after its depot key (casey_stengel, gun_hill,
+  jamaica, ...), optionally with a "depot_" prefix or "_depot" suffix. The bot
+  finds them by name at startup, so no IDs are needed. A depot's "emoji" value
+  below is only the fallback (or set it to "<:name:id>" to force one).
 * Meredith (closed Jan 2025) is left out; its buses moved to Castleton,
   Charleston and Yukon.
 * A few numbers appear under two depots on the source site. Those are left
@@ -285,10 +288,35 @@ def depot_for(vehicle_ref):
     return BY_NUMBER.get(number) if number is not None else None
 
 
+RESOLVED = {}  # depot key -> "<:name:id>", filled by set_emojis() at startup
+
+
+def _norm(text):
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+
+def set_emojis(emojis):
+    """Match emoji objects (server or application emojis) to depots by name.
+
+    Returns the depot keys that still have no emoji.
+    """
+    by_name = {}
+    for emoji in emojis:
+        by_name.setdefault(_norm(emoji.name), emoji)
+    RESOLVED.clear()
+    for key in DEPOTS:
+        base = _norm(key)
+        for candidate in (base, "depot" + base, base + "depot"):
+            if candidate in by_name:
+                RESOLVED[key] = str(by_name[candidate])
+                break
+    return [key for key in DEPOTS if key not in RESOLVED]
+
+
 def depot_badge(vehicle_ref):
-    """'🏢 Jamaica', or '' when the depot isn't known."""
+    """'<emoji> Jamaica', or '' when the depot isn't known."""
     key = depot_for(vehicle_ref)
     if not key:
         return ""
     depot = DEPOTS[key]
-    return f"{depot['emoji']} {depot['name']}"
+    return f"{RESOLVED.get(key) or depot['emoji']} {depot['name']}"
