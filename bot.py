@@ -16,7 +16,12 @@ from flask import Flask
 
 from service_types import service_type, badge
 from depots import DEPOTS, depot_badge, set_emojis as set_depot_emojis
-from route_layout import pretty, render_cards, render_route, set_glyph_emojis
+from route_layout import pretty, render_cards, render_route
+try:
+    from route_layout import set_glyph_emojis
+except ImportError:  # an older route_layout.py without name-based emoji lookup: keep its hard-coded GLYPHS
+    def set_glyph_emojis(emojis):
+        return []
 import presets
 
 load_dotenv()
@@ -270,35 +275,75 @@ class BusView(discord.ui.View):
         await interaction.edit_original_response(embed=route_embed(self.route, vehicles, self.stations, self.destination), view=BusView(self.route, vehicles, self.stations, self.destination))
 
 
-class StationView(discord.ui.View):
+# ---- Components V2 layouts (used by /station and /saved_stations) ----
+# Limits per message: 40 components (nested ones count) and 4000 characters of text in total.
+V2_ACCENT = 0x0039A6
+V2_MAX_TEXT = 3800   # leave headroom under the 4000-character text limit
+V2_MAX_BUSES = 15    # each bus uses 2 components (text + separator); 15 buses + controls stays under 40
+
+
+def bus_text(bus):
+    depot = depot_badge(bus.get("vehicle"))
+    depot_line = f"**Depot:** {depot}\n" if depot else ""
+    return f"### 📌 Route {bus['route']}\n**Service:** {badge(bus['service'])}\n{depot_line}**Destination:** {bus['destination']}\n**Status:** {bus['status']}"
+
+
+class StationLayout(discord.ui.LayoutView):
     def __init__(self, stop_id, stop_name, buses=(), route=None):
         super().__init__(timeout=180)
         self.stop_id, self.stop_name, self.buses, self.route = stop_id, stop_name, list(buses), route
+        shown = [b for b in self.buses if not route or b["route"] == route]
+
+        header = f"## 🚌 Real-Time Bus Arrivals\n📍 **{stop_name or 'Unknown stop'}**\nStop ID: **{stop_id}**"
+        container = discord.ui.Container(accent_colour=V2_ACCENT)
+        container.add_item(discord.ui.TextDisplay(header))
+        container.add_item(discord.ui.Separator())
+
+        used, count = len(header) + 200, 0  # 200 characters reserved for the footer
+        for bus in shown:
+            text = bus_text(bus)
+            if count >= V2_MAX_BUSES or used + len(text) > V2_MAX_TEXT:
+                break
+            if count:
+                container.add_item(discord.ui.Separator())
+            container.add_item(discord.ui.TextDisplay(text))
+            used += len(text)
+            count += 1
+        if not shown:
+            container.add_item(discord.ui.TextDisplay("⚠️ **No Services**\nNo upcoming buses detected for this stop."))
+
+        hidden = len(shown) - count
+        # <t:...:t> shows each viewer's own local time
+        footer = f"-# Updated <t:{int(datetime.datetime.now().timestamp())}:t>" + (f" · +{hidden} more not shown, use the filter" if hidden else "")
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay(footer))
+
         routes = sorted({b["route"] for b in self.buses})[:24]
         if routes:
-            select = discord.ui.Select(placeholder="Filter by bus", options=[discord.SelectOption(label="All buses", value="__all__", default=route is None)] + [discord.SelectOption(label=r[:100], value=r, default=r == route) for r in routes], row=0)
+            select = discord.ui.Select(placeholder="Filter by bus", options=[discord.SelectOption(label="All buses", value="__all__", default=route is None)] + [discord.SelectOption(label=r[:100], value=r, default=r == route) for r in routes])
             select.callback = self.route_changed
-            self.add_item(select)
-        if not (stop_name or self.buses):  # nothing to save for an unknown stop
-            self.remove_item(self.save_stop)
+            container.add_item(discord.ui.ActionRow(select))
 
-    def embed(self):
-        shown = [b for b in self.buses if not self.route or b["route"] == self.route]
-        return station_embed(self.stop_id, self.stop_name, shown)
+        refresh = discord.ui.Button(label="🔄 Refresh Live Times", style=discord.ButtonStyle.success)
+        refresh.callback = self.refresh_clicked
+        buttons = [refresh]
+        if stop_name or self.buses:  # nothing to save for an unknown stop
+            save = discord.ui.Button(label="⭐ Save Stop", style=discord.ButtonStyle.secondary)
+            save.callback = self.save_clicked
+            buttons.append(save)
+        container.add_item(discord.ui.ActionRow(*buttons))
+        self.add_item(container)
 
     async def route_changed(self, interaction):
         value = interaction.data["values"][0]
-        view = StationView(self.stop_id, self.stop_name, self.buses, None if value == "__all__" else value)
-        await interaction.response.edit_message(embed=view.embed(), view=view)
+        await interaction.response.edit_message(view=StationLayout(self.stop_id, self.stop_name, self.buses, None if value == "__all__" else value))
 
-    @discord.ui.button(label="🔄 Refresh Live Times", style=discord.ButtonStyle.success, row=1)
-    async def refresh(self, interaction, button):
+    async def refresh_clicked(self, interaction):
         await interaction.response.defer()
-        view = StationView(self.stop_id, self.stop_name, await get_stop_times(self.stop_id), self.route)
-        await interaction.edit_original_response(embed=view.embed(), view=view)
+        buses = await get_stop_times(self.stop_id)
+        await interaction.edit_original_response(view=StationLayout(self.stop_id, self.stop_name, buses, self.route))
 
-    @discord.ui.button(label="⭐ Save Stop", style=discord.ButtonStyle.secondary, row=1)
-    async def save_stop(self, interaction, button):
+    async def save_clicked(self, interaction):
         # Saves to whoever clicked, and replies privately so the shared message isn't changed.
         result = await asyncio.to_thread(presets.pin, interaction.user.id, self.stop_id, self.stop_name)
         name = self.stop_name or self.stop_id
@@ -310,30 +355,23 @@ class StationView(discord.ui.View):
         await interaction.response.send_message(message, ephemeral=True)
 
 
-def saved_embed(stops):
-    embed = discord.Embed(title="⭐ Saved Stops", color=0x0039A6)
-    if stops:
-        embed.description = "\n".join(f"**{name or 'Unknown stop'}** · Stop ID {stop_id}" for stop_id, name in stops)
-    else:
-        embed.description = "You haven't saved any stops yet. Use **⭐ Save Stop** under a /station result."
-    return embed
-
-
-def saved_payload(stops):
-    payload = {"embed": saved_embed(stops)}
-    if stops:
-        payload["view"] = SavedView(stops)
-    return payload
-
-
-class SavedView(discord.ui.View):
+class SavedLayout(discord.ui.LayoutView):
     def __init__(self, stops):
         super().__init__(timeout=180)
         self.names = dict(stops)
-        for placeholder, callback, row in (("Open a saved stop", self.open_stop, 0), ("Remove a saved stop", self.remove_stop, 1)):
-            select = discord.ui.Select(placeholder=placeholder, options=[discord.SelectOption(label=(name or stop_id)[:100], description=f"Stop {stop_id}", value=stop_id) for stop_id, name in stops[:presets.MAX_PINNED]], row=row)
-            select.callback = callback
-            self.add_item(select)
+        container = discord.ui.Container(accent_colour=V2_ACCENT)
+        container.add_item(discord.ui.TextDisplay("## ⭐ Saved Stops"))
+        container.add_item(discord.ui.Separator())
+        if stops:
+            container.add_item(discord.ui.TextDisplay("\n".join(f"**{name or 'Unknown stop'}** · Stop ID {stop_id}" for stop_id, name in stops)))
+            container.add_item(discord.ui.Separator())
+            for placeholder, callback in (("Open a saved stop", self.open_stop), ("Remove a saved stop", self.remove_stop)):
+                select = discord.ui.Select(placeholder=placeholder, options=[discord.SelectOption(label=(name or stop_id)[:100], description=f"Stop {stop_id}", value=stop_id) for stop_id, name in stops[:presets.MAX_PINNED]])
+                select.callback = callback
+                container.add_item(discord.ui.ActionRow(select))
+        else:
+            container.add_item(discord.ui.TextDisplay("You haven't saved any stops yet. Use **⭐ Save Stop** under a /station result."))
+        self.add_item(container)
 
     async def open_stop(self, interaction):
         stop_id = interaction.data["values"][0]
@@ -344,14 +382,12 @@ class SavedView(discord.ui.View):
             await interaction.followup.send(str(exc), ephemeral=True)
             return
         name = self.names.get(stop_id) or await get_stop_name(stop_id)
-        view = StationView(stop_id, name, buses)
-        await interaction.edit_original_response(embed=view.embed(), view=view)
+        await interaction.edit_original_response(view=StationLayout(stop_id, name, buses))
 
     async def remove_stop(self, interaction):
         await asyncio.to_thread(presets.unpin, interaction.user.id, interaction.data["values"][0])
-        payload = saved_payload(await asyncio.to_thread(presets.pinned, interaction.user.id))
-        payload.setdefault("view", None)  # no stops left: clear the dropdowns
-        await interaction.response.edit_message(**payload)
+        stops = await asyncio.to_thread(presets.pinned, interaction.user.id)
+        await interaction.response.edit_message(view=SavedLayout(stops))
 
 
 def station_embed(stop_id, name, buses):
@@ -415,7 +451,7 @@ async def station(interaction: discord.Interaction, station_number: str):
     except RuntimeError as exc:
         await interaction.followup.send(str(exc))
         return
-    await interaction.followup.send(embed=station_embed(stop_id, name, buses), view=StationView(stop_id, name, buses))
+    await interaction.followup.send(view=StationLayout(stop_id, name, buses))
     if name or buses:  # only remember stops that turned out to be real
         await asyncio.to_thread(presets.save, interaction.user.id, stop_id, name)
 
@@ -433,7 +469,7 @@ async def station_autocomplete(interaction: discord.Interaction, current: str):
 @everywhere
 async def saved_stations(interaction: discord.Interaction):
     stops = await asyncio.to_thread(presets.pinned, interaction.user.id)
-    await interaction.response.send_message(**saved_payload(stops), ephemeral=True)
+    await interaction.response.send_message(view=SavedLayout(stops), ephemeral=True)
 
 
 @bot.tree.command(name="bus", description="Show live buses operating on an MTA route")
