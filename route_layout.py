@@ -88,7 +88,7 @@ def pretty(text):
 def _bus_block(route, stop, buses, spacer=True):
     lines = [f"{G['bus']} **{pretty(stop)}**"]
     for i, v in enumerate(buses[:3]):
-        lines.append(f"{G['arrow'] if i == 0 else G['line']} Bus {v.get('proximity') or v['status']}")
+        lines.append(f"{G['gap'] if i == 0 else G['line']} Bus {v.get('proximity') or v['status']}")
         number = fleet_number(v["vehicle"])
         parts = [
             f"{G['badge']} **{route}**",
