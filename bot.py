@@ -15,7 +15,8 @@ from dotenv import load_dotenv
 from flask import Flask
 
 from service_types import service_type, badge
-from depots import DEPOTS, depot_badge, set_emojis as set_depot_emojis
+from depots import DEPOTS, depot_badge, fleet_number, set_emojis as set_depot_emojis
+from fleet_status import fleet_status
 from route_layout import pretty, render_cards, render_route, route_pages
 try:
     from route_layout import set_glyph_emojis
@@ -46,7 +47,7 @@ FEEDS = {
 }
 ALL_FEEDS = tuple(dict.fromkeys(FEEDS.values()))
 _stop_cache: OrderedDict[str, str] = OrderedDict()
-_route_cache: OrderedDict[str, list[str]] = OrderedDict()
+_route_cache: OrderedDict[str, list[dict]] = OrderedDict()
 _gtfs_lock = asyncio.Lock()
 
 
@@ -92,33 +93,90 @@ def _find_stop_name(data, stop_id):
 
 
 def _find_route_stops(data, route):
+    """Return every distinct GTFS stop pattern for a route, including short-turn trips."""
     # Blocking work: always call through asyncio.to_thread.
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        names = {}
+        stop_info = {}
         for row in csv_rows(archive, "stops.txt"):
-            stop_id, name = (row.get("stop_id") or "").strip(), (row.get("stop_name") or "").strip()
-            if stop_id and name:
-                names[stop_id] = name
-        trip_id = None
-        for row in csv_rows(archive, "trips.txt"):
-            if (row.get("route_id") or "").strip().upper() == route:
-                trip_id = (row.get("trip_id") or "").strip()
-                if trip_id:
-                    break
-        if not trip_id:
-            return []
-        ordered = []
-        for row in csv_rows(archive, "stop_times.txt"):
-            if (row.get("trip_id") or "").strip() == trip_id:
-                try:
-                    sequence = int(row.get("stop_sequence") or 0)
-                except ValueError:
-                    sequence = 0
-                stop_id = (row.get("stop_id") or "").strip()
-                if stop_id in names:
-                    ordered.append((sequence, names[stop_id]))
-        return [name for _, name in sorted(ordered)]
+            stop_id = (row.get("stop_id") or "").strip()
+            name = (row.get("stop_name") or "").strip()
+            if not stop_id or not name:
+                continue
+            try:
+                lat = float(row.get("stop_lat") or "")
+                lon = float(row.get("stop_lon") or "")
+            except ValueError:
+                lat = lon = None
+            stop_info[stop_id] = {"name": name, "lat": lat, "lon": lon}
 
+        route = route.upper()
+        route_ids = {route}
+        try:
+            for row in csv_rows(archive, "routes.txt"):
+                route_id = (row.get("route_id") or "").strip()
+                short_name = (row.get("route_short_name") or "").strip().upper()
+                if route_id and short_name == route:
+                    route_ids.add(route_id)
+        except KeyError:
+            pass
+
+        valid_route_ids = {item.upper() for item in route_ids}
+        trips = {}
+        for row in csv_rows(archive, "trips.txt"):
+            route_id = (row.get("route_id") or "").strip().upper()
+            if route_id not in valid_route_ids:
+                continue
+            trip_id = (row.get("trip_id") or "").strip()
+            if not trip_id:
+                continue
+            trips[trip_id] = {
+                "direction_id": (row.get("direction_id") or "").strip(),
+                "headsign": (row.get("trip_headsign") or "").strip(),
+            }
+        if not trips:
+            return []
+
+        stop_times = {trip_id: [] for trip_id in trips}
+        for row in csv_rows(archive, "stop_times.txt"):
+            trip_id = (row.get("trip_id") or "").strip()
+            if trip_id not in stop_times:
+                continue
+            try:
+                sequence = int(row.get("stop_sequence") or 0)
+            except ValueError:
+                sequence = 0
+            stop_id = (row.get("stop_id") or "").strip()
+            if stop_id in stop_info:
+                stop_times[trip_id].append((sequence, stop_id))
+
+        # Trips with the same direction and ordered stop IDs share a pattern.
+        # Different terminal trips remain separate, even when they share most stops.
+        grouped = {}
+        for trip_id, trip in trips.items():
+            ordered = tuple(stop_id for _, stop_id in sorted(stop_times[trip_id]))
+            if len(ordered) < 2:
+                continue
+            headsign = trip["headsign"]
+            # Keep distinct terminal/headsign variants even when their stop IDs happen
+            # to match; service destinations can differ by time of day.
+            key = (trip["direction_id"], ordered, headsign)
+            grouped.setdefault(key, {"headsign": headsign, "stop_ids": ordered})
+
+        patterns = []
+        for (direction_id, ordered, headsign), pattern_data in grouped.items():
+            info = [stop_info[stop_id] for stop_id in ordered]
+            patterns.append({
+                "direction_id": direction_id,
+                "headsign": headsign,
+                "stops": [item["name"] for item in info],
+                "stop_ids": list(ordered),
+                "start_lat": info[0]["lat"],
+                "start_lon": info[0]["lon"],
+                "end_lat": info[-1]["lat"],
+                "end_lon": info[-1]["lon"],
+            })
+        patterns.sort(key=lambda pattern: (pattern["direction_id"], pattern["headsign"], pattern["stops"][-1]))
+        return patterns
 
 async def get_stop_name(stop_id: str):
     if stop_id in _stop_cache:
@@ -240,7 +298,7 @@ async def get_route_data(route):
                 destination = str(journey.get("DestinationName") or "Destination unavailable")
                 distances = (call.get("Extensions") or {}).get("Distances") or {}
                 proximity = str(distances.get("PresentableDistance") or call.get("ArrivalProximityText") or "")
-                result.append({"proximity": proximity, "vehicle": str(journey.get("VehicleRef") or "bus"), "destination": destination, "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable"), "status": status(call), "service": service_type(journey.get("PublishedLineName") or journey.get("LineRef"), destination)})
+                result.append({"proximity": proximity, "vehicle": str(journey.get("VehicleRef") or "bus"), "destination": destination, "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable"), "direction_ref": str(journey.get("DirectionRef") or ""), "status": status(call), "service": service_type(journey.get("PublishedLineName") or journey.get("LineRef"), destination)})
     try:
         alerts = parse_alerts(payload, route)
     except (AttributeError, TypeError, ValueError, KeyError):
@@ -250,6 +308,192 @@ async def get_route_data(route):
 
 async def get_route_buses(route):
     return (await get_route_data(route))[0]
+
+
+def _single_value(value):
+    return value if isinstance(value, list) else ([value] if value else [])
+
+
+def _destination_score(destination, pattern):
+    left = normalize(destination)
+    right = normalize(pattern.get("headsign") or "")
+    terminal = normalize((pattern.get("stops") or [""])[-1])
+    if not left:
+        return 0
+    if left == right or left == terminal:
+        return 100
+    if left in right or right in left or left in terminal or terminal in left:
+        return 70
+    words = set(left.split())
+    return max(
+        int(45 * len(words & set(right.split())) / max(len(words), 1)),
+        int(45 * len(words & set(terminal.split())) / max(len(words), 1)),
+    )
+
+
+def _pattern_progress(patterns, stop_id, stop_name, destination, direction_ref=''):
+    candidates = []
+    for pattern in patterns:
+        ids = pattern.get("stop_ids") or []
+        stops = pattern.get("stops") or []
+        index = ids.index(stop_id) if stop_id and stop_id in ids else None
+        if index is None:
+            index = next((i for i, name in enumerate(stops) if matches(name, stop_name)), None)
+        if index is None:
+            continue
+        score = (100 if stop_id and index < len(ids) and ids[index] == stop_id else 50)
+        score += _destination_score(destination, pattern)
+        if direction_ref and str(pattern.get('direction_id') or '') == str(direction_ref):
+            score += 15
+        candidates.append((score, pattern, index))
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1], candidates[0][2]
+
+
+async def _live_vehicle_by_number(number):
+    if not MTA_KEY:
+        raise RuntimeError("MTA_API_KEY environment variable not found.")
+    errors = []
+    successful_lookup = False
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=18)) as session:
+        for vehicle_ref in (f"MTA NYCT_{number}", f"MTABC_{number}"):
+            try:
+                params = {"key": MTA_KEY, "VehicleRef": vehicle_ref, "VehicleMonitoringDetailLevel": "calls"}
+                async with session.get("https://bustime.mta.info/api/siri/vehicle-monitoring.json", params=params) as response:
+                    response.raise_for_status()
+                    payload = await response.json()
+                successful_lookup = True
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                errors.append(exc)
+                continue
+            deliveries = _single_value((payload.get("Siri", {}).get("ServiceDelivery", {}) or {}).get("VehicleMonitoringDelivery", []))
+            for delivery in deliveries:
+                for activity in _single_value(delivery.get("VehicleActivity", [])):
+                    journey = activity.get("MonitoredVehicleJourney", {}) or {}
+                    vehicle_ref_actual = str(journey.get("VehicleRef") or "")
+                    if fleet_number(vehicle_ref_actual) != number:
+                        continue
+                    call = journey.get("MonitoredCall", {}) or {}
+                    distances = (call.get("Extensions") or {}).get("Distances") or {}
+                    onward = _single_value((journey.get("OnwardCalls") or {}).get("OnwardCall", []))
+                    onward_names = [str(item.get("StopPointName") or item.get("StopPointRef") or "").strip() for item in onward]
+                    line = str(journey.get("PublishedLineName") or journey.get("LineRef") or "Unknown")
+                    if "_" in line:
+                        line = line.split("_")[-1]
+                    return {
+                        "number": number, "vehicle": vehicle_ref_actual, "route": line,
+                        "destination": str(journey.get("DestinationName") or "Destination unavailable"),
+                        "stop": str(call.get("StopPointName") or call.get("StopPointRef") or ""),
+                        "stop_id": str(call.get("StopPointRef") or ""),
+                        "proximity": str(distances.get("PresentableDistance") or call.get("ArrivalProximityText") or ""),
+                        "arrival_status": status(call), "direction_ref": str(journey.get("DirectionRef") or ""),
+                        "onward_names": [name for name in onward_names if name],
+                    }
+    if not successful_lookup and errors:
+        raise RuntimeError("The live MTA Bus Time lookup failed. Please try again shortly.")
+    return None
+
+
+async def get_bus_number_info(number):
+    live = await _live_vehicle_by_number(number)
+    depot = depot_badge(f"MTA NYCT_{number}") or depot_badge(f"MTABC_{number}")
+    info = {
+        "number": number,
+        "depot": depot or "Unknown / not listed in the depot roster",
+        "fleet_status": fleet_status(number, is_live=live is not None),
+        "live": live, "pattern": None, "stop_index": None, "stops": [],
+    }
+    if not live:
+        return info
+    patterns = await get_route_stops(live["route"])
+    pattern, index = _pattern_progress(patterns, live["stop_id"], live["stop"], live["destination"], live.get("direction_ref", ""))
+    info.update({"pattern": pattern, "stop_index": index, "stops": (pattern or {}).get("stops", [])})
+    return info
+
+
+class BusNumberView(discord.ui.View):
+    def __init__(self, info):
+        super().__init__(timeout=180)
+        self.info = info
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.success, row=0)
+    async def refresh_button(self, interaction, button):
+        await interaction.response.defer()
+        try:
+            info = await get_bus_number_info(self.info["number"])
+        except RuntimeError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+        await interaction.edit_original_response(embed=bus_number_embed(info), view=BusNumberView(info))
+
+
+def _trip_progress_text(stops, index):
+    """Show start/end plus the stops around the bus, collapsing long gaps."""
+    if not stops or index is None or not 0 <= index < len(stops):
+        return "GTFS stop pattern unavailable for this trip."
+
+    last = len(stops) - 1
+    visible = sorted({0, last, max(0, index - 1), index, min(last, index + 1)})
+    lines = []
+    previous_index = None
+    for stop_index in visible:
+        if previous_index is not None:
+            hidden = stop_index - previous_index - 1
+            if hidden > 0:
+                lines.append(f"⋮ *{hidden} more stops*")
+        name = pretty(stops[stop_index])
+        if stop_index == index:
+            if stop_index == 0:
+                label = f"🚌 **Bus here · Start:** {name}"
+            elif stop_index == last:
+                label = f"🚌 **Bus here · Terminal:** {name}"
+            else:
+                label = f"🚌 **Bus here:** {name}"
+        elif stop_index == 0:
+            label = f"🟢 **Start:** {name}"
+        elif stop_index == last:
+            label = f"🏁 **End:** {name}"
+        else:
+            label = f"• {name}"
+        lines.append(label)
+        previous_index = stop_index
+
+    remaining = max(last - index, 0)
+    lines.append("")
+    lines.append(f"**{index} stops before this stop · {remaining} stops to terminal**")
+    return "\n".join(lines)
+
+
+def bus_number_embed(info):
+    number = info["number"]
+    embed = discord.Embed(title=f"🚌 Bus #{number}", color=0x0039A6)
+    embed.add_field(name="Fleet status", value=info["fleet_status"], inline=True)
+    embed.add_field(name="Depot", value=info["depot"], inline=True)
+    live = info.get("live")
+    if not live:
+        embed.description = (
+            "No live trip is currently reported for this fleet number. "
+            "Absence from Bus Time does not prove that a bus is retired. "
+            "Retired and training labels come from the verified override list."
+        )
+        return embed
+    embed.add_field(name="Route / service", value=f"**{pretty(live['route'])}** · {badge(service_type(live['route'], live['destination']))}", inline=False)
+    embed.add_field(name="Going toward", value=pretty(live["destination"]), inline=True)
+    stop = pretty(live["stop"] or "Unavailable")
+    eta = live["arrival_status"] + (f" · {live['proximity']}" if live.get("proximity") else "")
+    embed.add_field(name="Monitored stop", value=f"{stop}\n{eta}", inline=True)
+    pattern, index = info.get("pattern"), info.get("stop_index")
+    stops = info.get("stops") or []
+    if pattern and index is not None:
+        embed.add_field(name="Trip progress", value=_trip_progress_text(stops, index), inline=False)
+    else:
+        upcoming = live.get("onward_names") or []
+        progress = "\n".join(f"• {pretty(name)}" for name in upcoming[:3]) or "GTFS stop pattern unavailable."
+        embed.add_field(name="Trip progress", value=progress + "\n\n**Stops remaining to terminal:** unavailable — could not match the live trip to a GTFS stop pattern.", inline=False)
+    embed.set_footer(text=f"Updated {datetime.datetime.now().strftime('%I:%M %p')} · Refresh for current positions")
+    return embed
 
 
 def route_embed(route, vehicles, stations, destination=None):
@@ -565,6 +809,27 @@ async def bus(interaction: discord.Interaction, bus: str):
         await interaction.followup.send(str(exc))
         return
     await interaction.followup.send(view=RouteLayout(route, vehicles, stations, alerts))
+
+
+@bot.tree.command(name="bus_number", description="Look up a bus fleet number and its live trip progress")
+@everywhere
+@app_commands.describe(bus_number="Fleet number, for example 8052")
+async def bus_number(interaction: discord.Interaction, bus_number: str):
+    raw_number = str(bus_number).strip()
+    if not raw_number.isdigit():
+        await interaction.response.send_message("Enter the numeric fleet number only, for example 8052.", ephemeral=True)
+        return
+    number = int(raw_number)
+    if number < 1 or number > 99999:
+        await interaction.response.send_message("That doesn't look like a valid fleet number.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    try:
+        info = await get_bus_number_info(number)
+    except RuntimeError as exc:
+        await interaction.followup.send(str(exc), ephemeral=True)
+        return
+    await interaction.followup.send(embed=bus_number_embed(info), view=BusNumberView(info))
 
 
 if __name__ == "__main__":
