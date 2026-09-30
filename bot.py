@@ -155,17 +155,15 @@ def _find_route_stops(data, route):
             ordered = tuple(stop_id for _, stop_id in sorted(stop_times[trip_id]))
             if len(ordered) < 2:
                 continue
-            key = (trip["direction_id"], ordered)
-            pattern = grouped.setdefault(key, {"headsign_counts": {}, "stop_ids": ordered})
             headsign = trip["headsign"]
-            if headsign:
-                pattern["headsign_counts"][headsign] = pattern["headsign_counts"].get(headsign, 0) + 1
+            # Keep distinct terminal/headsign variants even when their stop IDs happen
+            # to match; service destinations can differ by time of day.
+            key = (trip["direction_id"], ordered, headsign)
+            grouped.setdefault(key, {"headsign": headsign, "stop_ids": ordered})
 
         patterns = []
-        for (direction_id, ordered), pattern_data in grouped.items():
+        for (direction_id, ordered, headsign), pattern_data in grouped.items():
             info = [stop_info[stop_id] for stop_id in ordered]
-            headsign_counts = pattern_data["headsign_counts"]
-            headsign = max(headsign_counts, key=headsign_counts.get) if headsign_counts else ""
             patterns.append({
                 "direction_id": direction_id,
                 "headsign": headsign,
