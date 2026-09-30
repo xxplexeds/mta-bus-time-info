@@ -19,6 +19,7 @@ GLYPHS = {
     "line": "<:route_line:1551236998302539976>",    # the line between rows (inside bus cards)
     "bus": "<:route_bus:1551236995261538474>",    # a stop with a bus at it (replaces the tick)
     "arrow": "<:route_arrow_down:1554670313189408799>",  # DOWN direction header
+    "bus_arrow": "<:route_arrow:1551236993655251004>",  # bus-position arrow in the all-stations listing
     "up": "<:route_arrow_up_2:1554670488301735956>",  # UP direction header
     "badge": "<:route_badge:1551236994355433663>",  # in front of the route number on a bus card
     "gap": "<:route_gap:1551236997169807541>",     # a hidden stretch of stops
@@ -88,7 +89,7 @@ def pretty(text):
 def _bus_block(route, stop, buses, spacer=True):
     lines = [f"{G['bus']} **{pretty(stop)}**"]
     for i, v in enumerate(buses[:3]):
-        lines.append(f"{G['arrow'] if i == 0 else G['line']} Bus {v.get('proximity') or v['status']}")
+        lines.append(f"{G['bus_arrow'] if i == 0 else G['line']} Bus {v.get('proximity') or v['status']}")
         number = fleet_number(v["vehicle"])
         parts = [
             f"{G['badge']} **{route}**",
