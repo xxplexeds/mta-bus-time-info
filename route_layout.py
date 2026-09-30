@@ -18,8 +18,8 @@ GLYPHS = {
     "end": "<:route_end:1551236995949535415>",     # last stop of the route
     "line": "<:route_line:1551236998302539976>",    # the line between rows (inside bus cards)
     "bus": "<:route_bus:1551236995261538474>",    # a stop with a bus at it (replaces the tick)
-    "arrow": "<:route_arrow:1551236993655251004>",  # DOWN direction / under the bus
-    "up": "<:route_arrow_up:1554662427331924048>",  # UP direction
+    "arrow": "<:route_arrow_down:1554670313189408799>",  # DOWN direction header
+    "up": "<:route_arrow_up_2:1554670488301735956>",  # UP direction header
     "badge": "<:route_badge:1551236994355433663>",  # in front of the route number on a bus card
     "gap": "<:route_gap:1551236997169807541>",     # a hidden stretch of stops
 }
@@ -35,8 +35,8 @@ GLYPH_EMOJIS = {
     "route_line": ("line",),
     "route_gap": ("gap",),
     "route_bus": ("bus",),      # the marker on a stop that has a bus at it
-    "route_arrow": ("arrow",),  # DOWN direction / under the bus
-    "route_arrow_up": ("up",),  # UP direction
+    "route_arrow_down": ("arrow",),  # DOWN direction header
+    "route_arrow_up_2": ("up",),  # UP direction header
     "route_badge": ("badge",),  # small bus icon in front of the route number
 }
 
@@ -267,8 +267,8 @@ def route_pages(route, stations, shown, matches, limit=3800):
     assigned, unplaced = _assign_vehicle_patterns(patterns, shown)
     blocks = []
     for index, pattern in enumerate(patterns):
-        if index:
-            blocks.append([G["line"]])
+        # Each direction header starts a fresh route segment; don't draw a stray
+        # vertical route-line emoji immediately above the UP/DOWN arrow.
         blocks.extend(_pattern_blocks(route, pattern, assigned[index], matches))
 
     pages, current, size = [], [], 0
