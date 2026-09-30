@@ -18,7 +18,8 @@ GLYPHS = {
     "end": "<:route_end:1551236995949535415>",     # last stop of the route
     "line": "<:route_line:1551236998302539976>",    # the line between rows (inside bus cards)
     "bus": "<:route_bus:1551236995261538474>",    # a stop with a bus at it (replaces the tick)
-    "arrow": "<:route_arrow:1551236993655251004>",  # under the bus: direction of travel
+    "arrow": "<:route_arrow:1551236993655251004>",  # DOWN direction / under the bus
+    "up": "<:route_arrow_up:1554662427331924048>",  # UP direction
     "badge": "<:route_badge:1551236994355433663>",  # in front of the route number on a bus card
     "gap": "<:route_gap:1551236997169807541>",     # a hidden stretch of stops
 }
@@ -34,7 +35,8 @@ GLYPH_EMOJIS = {
     "route_line": ("line",),
     "route_gap": ("gap",),
     "route_bus": ("bus",),      # the marker on a stop that has a bus at it
-    "route_arrow": ("arrow",),  # under the bus: direction of travel
+    "route_arrow": ("arrow",),  # DOWN direction / under the bus
+    "route_arrow_up": ("up",),  # UP direction
     "route_badge": ("badge",),  # small bus icon in front of the route number
 }
 
@@ -142,80 +144,150 @@ def _collapse(blocks, keep):
     return lines
 
 
-def render_route(route, stations, shown, matches, limit=3800):
-    """The full stop list with bus cards, shrunk to fit an embed if needed."""
-    at = [[v for v in shown if matches(stop, v["stop"])] for stop in stations]
-    placed = {id(v) for buses in at for v in buses}
-    first = next((i for i, buses in enumerate(at) if buses), None)
-    last = len(stations) - 1
+def _normalise(text):
+    return " ".join(str(text or "").lower().replace("/", " ").split())
 
-    blocks = []
-    for i, stop in enumerate(stations):
-        if at[i]:
-            blocks.append({"bus": True, "lines": _bus_block(route, stop, at[i])})
+
+def _text_match_score(left, right):
+    """A small fuzzy score for matching live destinations to GTFS headsigns/terminals."""
+    left, right = _normalise(left), _normalise(right)
+    if not left or not right:
+        return 0
+    if left == right:
+        return 100
+    if left in right or right in left:
+        return 80
+    left_words, right_words = set(left.split()), set(right.split())
+    overlap = len(left_words & right_words)
+    if not overlap:
+        return 0
+    return int(50 * overlap / max(len(left_words), len(right_words)))
+
+
+def _pattern_direction(pattern):
+    """Use terminal geography for UP/DOWN; direction_id is only a fallback."""
+    start_lat, end_lat = pattern.get("start_lat"), pattern.get("end_lat")
+    if start_lat is not None and end_lat is not None and abs(end_lat - start_lat) > 0.001:
+        return ("UP", G["up"]) if end_lat > start_lat else ("DOWN", G["arrow"])
+    return ("UP", G["up"]) if str(pattern.get("direction_id")) == "0" else ("DOWN", G["arrow"])
+
+
+def _as_patterns(stations):
+    if stations and isinstance(stations[0], dict):
+        return stations
+    # Backwards compatibility for callers still passing the old single stop list.
+    if stations:
+        return [{
+            "direction_id": "",
+            "headsign": stations[-1],
+            "stops": stations,
+            "start_lat": None,
+            "end_lat": None,
+        }]
+    return []
+
+
+def _assign_vehicle_patterns(patterns, vehicles):
+    """Assign each live bus to the most plausible GTFS pattern, once only."""
+    assigned = {index: [] for index in range(len(patterns))}
+    unplaced = []
+    for vehicle in vehicles:
+        destination = vehicle.get("destination", "")
+        live_stop = vehicle.get("stop", "")
+        direction_ref = str(vehicle.get("direction_ref") or "")
+        scores = []
+        for index, pattern in enumerate(patterns):
+            stops = pattern.get("stops") or []
+            terminal = stops[-1] if stops else ""
+            destination_score = max(
+                _text_match_score(destination, pattern.get("headsign", "")),
+                _text_match_score(destination, terminal),
+            )
+            stop_match = any(_normalise(stop) == _normalise(live_stop) for stop in stops)
+            direction_match = bool(direction_ref and direction_ref == str(pattern.get("direction_id") or ""))
+            score = destination_score * 10 + (5 if direction_match else 0) + (1 if stop_match else 0)
+            scores.append((score, index, destination_score, stop_match))
+
+        eligible = [item for item in scores if item[2] > 0]
+        if eligible:
+            eligible.sort(key=lambda item: (-item[0], item[1]))
+            best = eligible[0]
+            tied = [item for item in eligible if item[0] == best[0]]
+            containing_stop = [item for item in tied if item[3]]
+            chosen = (containing_stop or tied)[0]
+            assigned[chosen[1]].append(vehicle)
             continue
-        if i == 0:
-            glyph = G["start"]
-        elif i == last:
-            glyph = G["end"]
-        elif first is not None and i < first:
-            glyph = G["passed"]
+
+        containing = [item for item in scores if item[3]]
+        if len(containing) == 1:
+            assigned[containing[0][1]].append(vehicle)
         else:
-            glyph = G["stop"]
-        blocks.append({"bus": False, "lines": [f"{glyph} {pretty(stop)}"]})
-
-    text = ""
-    for keep in (10 ** 6, 20, 12, 8, 5, 3, 2, 1):
-        text = "\n".join(_collapse(blocks, keep))
-        if len(text) <= limit:
-            break
-    else:
-        text = text[:limit].rsplit("\n", 1)[0] + "\n… more stops hidden, use the station filter."
-
-    unplaced = [v for v in shown if id(v) not in placed]
-    if unplaced:
-        noun = "bus" if len(unplaced) == 1 else "buses"
-        text += f"\n\n*+{len(unplaced)} {noun} not on this stop list (other direction)*"
-    return text
+            unplaced.append(vehicle)
+    return assigned, unplaced
 
 
-def route_pages(route, stations, shown, matches, limit=3800):
-    """Like render_route, but instead of collapsing long quiet stretches into a
-    '+N more stops' gap, splits the full stop list into pages of `limit` characters
-    each, so nothing is hidden -- the caller pages through it with buttons instead."""
-    at = [[v for v in shown if matches(stop, v["stop"])] for stop in stations]
-    placed = {id(v) for buses in at for v in buses}
+def _pattern_blocks(route, pattern, vehicles, matches):
+    stops = pattern.get("stops") or []
+    direction, arrow = _pattern_direction(pattern)
+    terminal = pattern.get("headsign") or (stops[-1] if stops else "Unknown terminal")
+    blocks = [[f"{arrow} **{direction} — To {pretty(terminal)}**"]]
+    at = [[v for v in vehicles if matches(stop, v.get("stop", ""))] for stop in stops]
     first = next((i for i, buses in enumerate(at) if buses), None)
-    last = len(stations) - 1
-
-    blocks = []
-    for i, stop in enumerate(stations):
-        if at[i]:
-            blocks.append(_bus_block(route, stop, at[i], spacer=False))
+    last = len(stops) - 1
+    for index, stop in enumerate(stops):
+        if at[index]:
+            blocks.append(_bus_block(route, stop, at[index], spacer=False))
             continue
-        if i == 0:
+        if index == 0:
             glyph = G["start"]
-        elif i == last:
+        elif index == last:
             glyph = G["end"]
-        elif first is not None and i < first:
+        elif first is not None and index < first:
             glyph = G["passed"]
         else:
             glyph = G["stop"]
         blocks.append([f"{glyph} {pretty(stop)}"])
+    return blocks
+
+
+def render_route(route, stations, shown, matches, limit=3800):
+    """Render route patterns; the Components V2 view supplies pagination."""
+    pages = route_pages(route, stations, shown, matches, limit=limit)
+    if len(pages) <= 1:
+        return pages[0] if pages else ""
+    return pages[0] + "\n\n*More stops are available on the paginated route view.*"
+
+
+def route_pages(route, stations, shown, matches, limit=3800):
+    """Render every distinct GTFS pattern and paginate without silently dropping stops."""
+    patterns = _as_patterns(stations)
+    if not patterns:
+        return [""]
+
+    assigned, unplaced = _assign_vehicle_patterns(patterns, shown)
+    blocks = []
+    for index, pattern in enumerate(patterns):
+        if index:
+            blocks.append([G["line"]])
+        blocks.extend(_pattern_blocks(route, pattern, assigned[index], matches))
 
     pages, current, size = [], [], 0
     for block in blocks:
         text = "\n".join(block)
-        block_len = len(text) + 1  # +1 for the join newline
+        block_len = len(text) + 1
         if current and size + block_len > limit:
             pages.append("\n".join(current))
             current, size = [], 0
         current.append(text)
         size += block_len
-    pages.append("\n".join(current))  # always at least one page, even if empty
+    if current or not pages:
+        pages.append("\n".join(current))
 
-    unplaced = [v for v in shown if id(v) not in placed]
     if unplaced:
         noun = "bus" if len(unplaced) == 1 else "buses"
-        pages[-1] += f"\n\n*+{len(unplaced)} {noun} not on this stop list (other direction)*"
+        note = f"*+{len(unplaced)} {noun} could not be matched to a stop pattern.*"
+        if len(pages[-1]) + len(note) + 2 <= limit:
+            pages[-1] += "\n\n" + note
+        else:
+            pages.append(note)
     return pages
