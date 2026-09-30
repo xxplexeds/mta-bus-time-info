@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from flask import Flask
 
 from service_types import service_type, badge
-from depots import DEPOTS, BY_NUMBER, depot_badge, fleet_number, set_emojis as set_depot_emojis
+from depots import DEPOTS, depot_badge, fleet_number, set_emojis as set_depot_emojis
 from fleet_status import fleet_status
 from route_layout import pretty, render_cards, render_route, route_pages
 try:
@@ -331,7 +331,7 @@ def _destination_score(destination, pattern):
     )
 
 
-def _pattern_progress(patterns, stop_id, stop_name, destination):
+def _pattern_progress(patterns, stop_id, stop_name, destination, direction_ref=''):
     candidates = []
     for pattern in patterns:
         ids = pattern.get("stop_ids") or []
@@ -343,6 +343,8 @@ def _pattern_progress(patterns, stop_id, stop_name, destination):
             continue
         score = (100 if stop_id and index < len(ids) and ids[index] == stop_id else 50)
         score += _destination_score(destination, pattern)
+        if direction_ref and str(pattern.get('direction_id') or '') == str(direction_ref):
+            score += 15
         candidates.append((score, pattern, index))
     if not candidates:
         return None, None
@@ -406,7 +408,7 @@ async def get_bus_number_info(number):
     if not live:
         return info
     patterns = await get_route_stops(live["route"])
-    pattern, index = _pattern_progress(patterns, live["stop_id"], live["stop"], live["destination"])
+    pattern, index = _pattern_progress(patterns, live["stop_id"], live["stop"], live["destination"], live.get("direction_ref", ""))
     info.update({"pattern": pattern, "stop_index": index, "stops": (pattern or {}).get("stops", [])})
     return info
 
