@@ -17,7 +17,7 @@ from flask import Flask
 from service_types import service_type, badge
 from depots import DEPOTS, depot_badge, fleet_number, set_emojis as set_depot_emojis
 from fleet_status import fleet_status
-from route_layout import pretty, render_cards, render_route, route_pages
+from route_layout import GLYPHS as ROUTE_GLYPHS, pretty, render_cards, render_route, route_pages
 try:
     from route_layout import set_glyph_emojis
 except ImportError:  # an older route_layout.py without name-based emoji lookup: keep its hard-coded GLYPHS
@@ -413,87 +413,102 @@ async def get_bus_number_info(number):
     return info
 
 
-class BusNumberView(discord.ui.View):
+def _trip_progress_text(stops, index):
+    """Render compact trip progress using the same custom route glyphs as /bus."""
+    if not stops or index is None or not 0 <= index < len(stops):
+        return "GTFS stop pattern unavailable for this trip."
+
+    glyphs = ROUTE_GLYPHS
+    last = len(stops) - 1
+    visible = sorted({0, last, max(0, index - 1), index, min(last, index + 1)})
+    lines = []
+    previous_index = None
+
+    for stop_index in visible:
+        if previous_index is not None:
+            hidden = stop_index - previous_index - 1
+            if hidden > 0:
+                lines.append(f"{glyphs['gap']} *{hidden} more stops*")
+
+        name = pretty(stops[stop_index])
+        if stop_index == index:
+            marker = glyphs["bus"]
+            label = f"{marker} **Bus here: {name}**"
+        elif stop_index == 0:
+            label = f"{glyphs['start']} **Start:** {name}"
+        elif stop_index == last:
+            label = f"{glyphs['end']} **End:** {name}"
+        else:
+            label = f"{glyphs['stop']} {name}"
+        lines.append(label)
+        previous_index = stop_index
+
+    remaining = max(last - index, 0)
+    lines.extend(["", f"**{index} stops before this stop · {remaining} stops to terminal**"])
+    return "\n".join(lines)
+
+
+class BusNumberLayout(discord.ui.LayoutView):
+    """Components V2 layout for /bus_number, using the shared custom route glyphs."""
+
     def __init__(self, info):
         super().__init__(timeout=180)
         self.info = info
+        number = info["number"]
+        live = info.get("live")
 
-    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.success, row=0)
-    async def refresh_button(self, interaction, button):
+        container = discord.ui.Container(accent_colour=V2_ACCENT)
+        container.add_item(discord.ui.TextDisplay(f"## 🚌 Bus #{number}"))
+        container.add_item(discord.ui.TextDisplay(
+            f"**Fleet status:** {info['fleet_status']}    ·    **Depot:** {info['depot']}"
+        ))
+        container.add_item(discord.ui.Separator())
+
+        if not live:
+            container.add_item(discord.ui.TextDisplay(
+                "⚠️ **No live trip currently reported**\n"
+                "Absence from Bus Time does not prove that a bus is retired. "
+                "Retired and training labels come from the verified override list."
+            ))
+        else:
+            route_service = f"**{pretty(live['route'])}** · {badge(service_type(live['route'], live['destination']))}"
+            container.add_item(discord.ui.TextDisplay(f"**Route / service**\n{route_service}"))
+            container.add_item(discord.ui.TextDisplay(
+                f"**Going toward**\n{pretty(live['destination'])}\n\n"
+                f"**Monitored stop**\n{pretty(live['stop'] or 'Unavailable')}\n"
+                f"{live['arrival_status']}" + (f" · {live['proximity']}" if live.get("proximity") else "")
+            ))
+            container.add_item(discord.ui.Separator())
+            container.add_item(discord.ui.TextDisplay("### Trip progress"))
+            pattern, index = info.get("pattern"), info.get("stop_index")
+            stops = info.get("stops") or []
+            if pattern and index is not None:
+                progress = _trip_progress_text(stops, index)
+            else:
+                upcoming = live.get("onward_names") or []
+                progress = "\n".join(f"{ROUTE_GLYPHS['stop']} {pretty(name)}" for name in upcoming[:3])
+                if not progress:
+                    progress = "GTFS stop pattern unavailable."
+                progress += "\n\n**Stops remaining to terminal:** unavailable — could not match the live trip to a GTFS stop pattern."
+            container.add_item(discord.ui.TextDisplay(progress))
+
+        container.add_item(discord.ui.Separator())
+        container.add_item(discord.ui.TextDisplay(
+            f"-# Updated <t:{int(datetime.datetime.now().timestamp())}:t> · Refresh for current positions"
+        ))
+        refresh = discord.ui.Button(label="🔄 Refresh", style=discord.ButtonStyle.success)
+        refresh.callback = self.refresh_clicked
+        container.add_item(discord.ui.ActionRow(refresh))
+        self.add_item(container)
+
+    async def refresh_clicked(self, interaction):
         await interaction.response.defer()
         try:
             info = await get_bus_number_info(self.info["number"])
         except RuntimeError as exc:
             await interaction.followup.send(str(exc), ephemeral=True)
             return
-        await interaction.edit_original_response(embed=bus_number_embed(info), view=BusNumberView(info))
-
-
-def _trip_progress_text(stops, index):
-    """Show start/end plus the stops around the bus, collapsing long gaps."""
-    if not stops or index is None or not 0 <= index < len(stops):
-        return "GTFS stop pattern unavailable for this trip."
-
-    last = len(stops) - 1
-    visible = sorted({0, last, max(0, index - 1), index, min(last, index + 1)})
-    lines = []
-    previous_index = None
-    for stop_index in visible:
-        if previous_index is not None:
-            hidden = stop_index - previous_index - 1
-            if hidden > 0:
-                lines.append(f"⋮ *{hidden} more stops*")
-        name = pretty(stops[stop_index])
-        if stop_index == index:
-            if stop_index == 0:
-                label = f"🚌 **Bus here · Start:** {name}"
-            elif stop_index == last:
-                label = f"🚌 **Bus here · Terminal:** {name}"
-            else:
-                label = f"🚌 **Bus here:** {name}"
-        elif stop_index == 0:
-            label = f"🟢 **Start:** {name}"
-        elif stop_index == last:
-            label = f"🏁 **End:** {name}"
-        else:
-            label = f"• {name}"
-        lines.append(label)
-        previous_index = stop_index
-
-    remaining = max(last - index, 0)
-    lines.append("")
-    lines.append(f"**{index} stops before this stop · {remaining} stops to terminal**")
-    return "\n".join(lines)
-
-
-def bus_number_embed(info):
-    number = info["number"]
-    embed = discord.Embed(title=f"🚌 Bus #{number}", color=0x0039A6)
-    embed.add_field(name="Fleet status", value=info["fleet_status"], inline=True)
-    embed.add_field(name="Depot", value=info["depot"], inline=True)
-    live = info.get("live")
-    if not live:
-        embed.description = (
-            "No live trip is currently reported for this fleet number. "
-            "Absence from Bus Time does not prove that a bus is retired. "
-            "Retired and training labels come from the verified override list."
-        )
-        return embed
-    embed.add_field(name="Route / service", value=f"**{pretty(live['route'])}** · {badge(service_type(live['route'], live['destination']))}", inline=False)
-    embed.add_field(name="Going toward", value=pretty(live["destination"]), inline=True)
-    stop = pretty(live["stop"] or "Unavailable")
-    eta = live["arrival_status"] + (f" · {live['proximity']}" if live.get("proximity") else "")
-    embed.add_field(name="Monitored stop", value=f"{stop}\n{eta}", inline=True)
-    pattern, index = info.get("pattern"), info.get("stop_index")
-    stops = info.get("stops") or []
-    if pattern and index is not None:
-        embed.add_field(name="Trip progress", value=_trip_progress_text(stops, index), inline=False)
-    else:
-        upcoming = live.get("onward_names") or []
-        progress = "\n".join(f"• {pretty(name)}" for name in upcoming[:3]) or "GTFS stop pattern unavailable."
-        embed.add_field(name="Trip progress", value=progress + "\n\n**Stops remaining to terminal:** unavailable — could not match the live trip to a GTFS stop pattern.", inline=False)
-    embed.set_footer(text=f"Updated {datetime.datetime.now().strftime('%I:%M %p')} · Refresh for current positions")
-    return embed
+        await interaction.edit_original_response(view=BusNumberLayout(info))
 
 
 def route_embed(route, vehicles, stations, destination=None):
@@ -829,7 +844,7 @@ async def bus_number(interaction: discord.Interaction, bus_number: str):
     except RuntimeError as exc:
         await interaction.followup.send(str(exc), ephemeral=True)
         return
-    await interaction.followup.send(embed=bus_number_embed(info), view=BusNumberView(info))
+    await interaction.followup.send(view=BusNumberLayout(info), ephemeral=False)
 
 
 if __name__ == "__main__":
