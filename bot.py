@@ -46,7 +46,7 @@ FEEDS = {
 }
 ALL_FEEDS = tuple(dict.fromkeys(FEEDS.values()))
 _stop_cache: OrderedDict[str, str] = OrderedDict()
-_route_cache: OrderedDict[str, list[str]] = OrderedDict()
+_route_cache: OrderedDict[str, list[dict]] = OrderedDict()
 _gtfs_lock = asyncio.Lock()
 
 
@@ -92,33 +92,92 @@ def _find_stop_name(data, stop_id):
 
 
 def _find_route_stops(data, route):
+    """Return every distinct GTFS stop pattern for a route, including short-turn trips."""
     # Blocking work: always call through asyncio.to_thread.
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        names = {}
+        stop_info = {}
         for row in csv_rows(archive, "stops.txt"):
-            stop_id, name = (row.get("stop_id") or "").strip(), (row.get("stop_name") or "").strip()
-            if stop_id and name:
-                names[stop_id] = name
-        trip_id = None
-        for row in csv_rows(archive, "trips.txt"):
-            if (row.get("route_id") or "").strip().upper() == route:
-                trip_id = (row.get("trip_id") or "").strip()
-                if trip_id:
-                    break
-        if not trip_id:
-            return []
-        ordered = []
-        for row in csv_rows(archive, "stop_times.txt"):
-            if (row.get("trip_id") or "").strip() == trip_id:
-                try:
-                    sequence = int(row.get("stop_sequence") or 0)
-                except ValueError:
-                    sequence = 0
-                stop_id = (row.get("stop_id") or "").strip()
-                if stop_id in names:
-                    ordered.append((sequence, names[stop_id]))
-        return [name for _, name in sorted(ordered)]
+            stop_id = (row.get("stop_id") or "").strip()
+            name = (row.get("stop_name") or "").strip()
+            if not stop_id or not name:
+                continue
+            try:
+                lat = float(row.get("stop_lat") or "")
+                lon = float(row.get("stop_lon") or "")
+            except ValueError:
+                lat = lon = None
+            stop_info[stop_id] = {"name": name, "lat": lat, "lon": lon}
 
+        route = route.upper()
+        route_ids = {route}
+        try:
+            for row in csv_rows(archive, "routes.txt"):
+                route_id = (row.get("route_id") or "").strip()
+                short_name = (row.get("route_short_name") or "").strip().upper()
+                if route_id and short_name == route:
+                    route_ids.add(route_id)
+        except KeyError:
+            pass
+
+        valid_route_ids = {item.upper() for item in route_ids}
+        trips = {}
+        for row in csv_rows(archive, "trips.txt"):
+            route_id = (row.get("route_id") or "").strip().upper()
+            if route_id not in valid_route_ids:
+                continue
+            trip_id = (row.get("trip_id") or "").strip()
+            if not trip_id:
+                continue
+            trips[trip_id] = {
+                "direction_id": (row.get("direction_id") or "").strip(),
+                "headsign": (row.get("trip_headsign") or "").strip(),
+            }
+        if not trips:
+            return []
+
+        stop_times = {trip_id: [] for trip_id in trips}
+        for row in csv_rows(archive, "stop_times.txt"):
+            trip_id = (row.get("trip_id") or "").strip()
+            if trip_id not in stop_times:
+                continue
+            try:
+                sequence = int(row.get("stop_sequence") or 0)
+            except ValueError:
+                sequence = 0
+            stop_id = (row.get("stop_id") or "").strip()
+            if stop_id in stop_info:
+                stop_times[trip_id].append((sequence, stop_id))
+
+        # Trips with the same direction and ordered stop IDs share a pattern.
+        # Different terminal trips remain separate, even when they share most stops.
+        grouped = {}
+        for trip_id, trip in trips.items():
+            ordered = tuple(stop_id for _, stop_id in sorted(stop_times[trip_id]))
+            if len(ordered) < 2:
+                continue
+            key = (trip["direction_id"], ordered)
+            pattern = grouped.setdefault(key, {"headsign_counts": {}, "stop_ids": ordered})
+            headsign = trip["headsign"]
+            if headsign:
+                pattern["headsign_counts"][headsign] = pattern["headsign_counts"].get(headsign, 0) + 1
+
+        patterns = []
+        for (direction_id, ordered), pattern_data in grouped.items():
+            info = [stop_info[stop_id] for stop_id in ordered]
+            headsign_counts = pattern_data["headsign_counts"]
+            headsign = max(headsign_counts, key=headsign_counts.get) if headsign_counts else ""
+            patterns.append({
+                "direction_id": direction_id,
+                "headsign": headsign,
+                "stops": [item["name"] for item in info],
+                "stop_ids": list(ordered),
+                "start_lat": info[0]["lat"],
+                "start_lon": info[0]["lon"],
+                "end_lat": info[-1]["lat"],
+                "end_lon": info[-1]["lon"],
+            })
+        patterns.sort(key=lambda pattern: (pattern["direction_id"], pattern["headsign"], pattern["stops"][-1]))
+        return patterns
 
 async def get_stop_name(stop_id: str):
     if stop_id in _stop_cache:
@@ -240,7 +299,7 @@ async def get_route_data(route):
                 destination = str(journey.get("DestinationName") or "Destination unavailable")
                 distances = (call.get("Extensions") or {}).get("Distances") or {}
                 proximity = str(distances.get("PresentableDistance") or call.get("ArrivalProximityText") or "")
-                result.append({"proximity": proximity, "vehicle": str(journey.get("VehicleRef") or "bus"), "destination": destination, "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable"), "status": status(call), "service": service_type(journey.get("PublishedLineName") or journey.get("LineRef"), destination)})
+                result.append({"proximity": proximity, "vehicle": str(journey.get("VehicleRef") or "bus"), "destination": destination, "stop": str(call.get("StopPointName") or call.get("StopPointRef") or "Location unavailable"), "direction_ref": str(journey.get("DirectionRef") or ""), "status": status(call), "service": service_type(journey.get("PublishedLineName") or journey.get("LineRef"), destination)})
     try:
         alerts = parse_alerts(payload, route)
     except (AttributeError, TypeError, ValueError, KeyError):
