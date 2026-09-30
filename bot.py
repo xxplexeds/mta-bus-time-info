@@ -429,6 +429,43 @@ class BusNumberView(discord.ui.View):
         await interaction.edit_original_response(embed=bus_number_embed(info), view=BusNumberView(info))
 
 
+def _trip_progress_text(stops, index):
+    """Show start/end plus the stops around the bus, collapsing long gaps."""
+    if not stops or index is None or not 0 <= index < len(stops):
+        return "GTFS stop pattern unavailable for this trip."
+
+    last = len(stops) - 1
+    visible = sorted({0, last, max(0, index - 1), index, min(last, index + 1)})
+    lines = []
+    previous_index = None
+    for stop_index in visible:
+        if previous_index is not None:
+            hidden = stop_index - previous_index - 1
+            if hidden > 0:
+                lines.append(f"⋮ *{hidden} more stops*")
+        name = pretty(stops[stop_index])
+        if stop_index == index:
+            if stop_index == 0:
+                label = f"🚌 **Bus here · Start:** {name}"
+            elif stop_index == last:
+                label = f"🚌 **Bus here · Terminal:** {name}"
+            else:
+                label = f"🚌 **Bus here:** {name}"
+        elif stop_index == 0:
+            label = f"🟢 **Start:** {name}"
+        elif stop_index == last:
+            label = f"🏁 **End:** {name}"
+        else:
+            label = f"• {name}"
+        lines.append(label)
+        previous_index = stop_index
+
+    remaining = max(last - index, 0)
+    lines.append("")
+    lines.append(f"**{index} stops before this stop · {remaining} stops to terminal**")
+    return "\n".join(lines)
+
+
 def bus_number_embed(info):
     number = info["number"]
     embed = discord.Embed(title=f"🚌 Bus #{number}", color=0x0039A6)
@@ -450,15 +487,11 @@ def bus_number_embed(info):
     pattern, index = info.get("pattern"), info.get("stop_index")
     stops = info.get("stops") or []
     if pattern and index is not None:
-        previous = pretty(stops[index - 1]) if index > 0 else "Route beginning"
-        following = pretty(stops[index + 1]) if index + 1 < len(stops) else "Terminal"
-        remaining = max(len(stops) - index - 1, 0)
-        embed.add_field(name="Nearby stops", value=f"← Previous: {previous}\n📍 Monitored: {pretty(stops[index])}\n→ Next: {following}", inline=False)
-        embed.add_field(name="Trip progress", value=f"{index} stops from route beginning\n**{remaining} stops after this stop** to terminal: **{pretty(stops[-1])}**", inline=False)
+        embed.add_field(name="Trip progress", value=_trip_progress_text(stops, index), inline=False)
     else:
         upcoming = live.get("onward_names") or []
-        embed.add_field(name="Nearby / onward stops", value="\n".join(f"• {pretty(name)}" for name in upcoming[:3]) or "GTFS stop pattern unavailable.", inline=False)
-        embed.add_field(name="Stops remaining", value="Unavailable — could not match the live trip to a GTFS stop pattern.", inline=False)
+        progress = "\n".join(f"• {pretty(name)}" for name in upcoming[:3]) or "GTFS stop pattern unavailable."
+        embed.add_field(name="Trip progress", value=progress + "\n\n**Stops remaining to terminal:** unavailable — could not match the live trip to a GTFS stop pattern.", inline=False)
     embed.set_footer(text=f"Updated {datetime.datetime.now().strftime('%I:%M %p')} · Refresh for current positions")
     return embed
 
