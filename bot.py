@@ -3,6 +3,7 @@ import csv
 import datetime
 import io
 import os
+import random
 import zipfile
 from collections import OrderedDict
 from threading import Thread
@@ -847,9 +848,52 @@ async def bus_number(interaction: discord.Interaction, bus_number: str):
     await interaction.followup.send(view=BusNumberLayout(info), ephemeral=False)
 
 
+async def run_bot_with_retries():
+    """Retry transient Discord/API startup failures with exponential backoff."""
+    attempt = 0
+
+    while True:
+        try:
+            await bot.start(TOKEN)
+            return
+        except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            # Invalid credentials/permissions are not transient; don't retry them forever.
+            if isinstance(exc, discord.HTTPException):
+                status = getattr(exc, "status", None)
+                if status != 429 and (status is None or status < 500):
+                    raise
+
+            attempt += 1
+            # Start at ~60s for rate limits, then back off to at most 15 minutes.
+            delay = min(60 * (2 ** min(attempt - 1, 4)), 900)
+            delay += random.uniform(0, 10)
+
+            # Honor a server-provided Retry-After when available.
+            response = getattr(exc, "response", None)
+            headers = getattr(response, "headers", {}) or {}
+            try:
+                retry_after = float(headers.get("Retry-After", 0))
+                delay = max(delay, retry_after)
+            except (TypeError, ValueError):
+                pass
+
+            print(
+                f"Discord connection failed ({type(exc).__name__}: {exc}). "
+                f"Retrying in {delay:.0f}s (attempt {attempt})."
+            )
+            try:
+                await bot.close()
+            except Exception as close_exc:
+                print(f"Warning: error while closing Discord client: {close_exc}")
+            finally:
+                bot.clear()
+
+            await asyncio.sleep(delay)
+
+
 if __name__ == "__main__":
     if not TOKEN:
         print("Error: DISCORD_TOKEN environment variable not found.")
     else:
         Thread(target=run_health_server, daemon=True).start()
-        bot.run(TOKEN)
+        asyncio.run(run_bot_with_retries())
