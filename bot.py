@@ -2,8 +2,10 @@ import asyncio
 import csv
 import datetime
 import io
+import logging
 import os
 import random
+import sys
 import zipfile
 from collections import OrderedDict
 from threading import Thread
@@ -27,8 +29,16 @@ except ImportError:  # an older route_layout.py without name-based emoji lookup:
 import presets
 from service_status import parse_alerts, status_text
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
+logger = logging.getLogger("mta-bus-time")
+
 load_dotenv()
-TOKEN = os.getenv("DISCORD_TOKEN")
+TOKEN = (os.getenv("DISCORD_TOKEN") or "").strip()
 MTA_KEY = os.getenv("MTA_API_KEY")
 
 health_app = Flask(__name__)
@@ -54,7 +64,18 @@ _gtfs_lock = asyncio.Lock()
 
 @health_app.get("/")
 def health_check():
-    return "MTA Bus Time bot is running", 200
+    return "MTA Bus Time web service is running", 200
+
+
+@health_app.get("/status")
+def connection_status():
+    # Render's HTTP health check can succeed even when Discord is disconnected.
+    ready = bot.is_ready()
+    return {
+        "web": "running",
+        "discord": "ready" if ready else "not_ready",
+        "guild_count": len(bot.guilds) if ready else None,
+    }, 200
 
 
 def run_health_server():
@@ -747,9 +768,22 @@ class BusBot(commands.Bot):
         super().__init__(command_prefix="!", intents=discord.Intents.default())
 
     async def setup_hook(self):
-        await self.tree.sync()
+        logger.info("Discord login succeeded; syncing slash commands before connecting gateway")
+        try:
+            synced = await self.tree.sync()
+        except Exception:
+            logger.exception("Discord slash-command sync failed during startup")
+            raise
+        logger.info("Discord slash-command sync complete (%d commands)", len(synced))
+
+    async def on_connect(self):
+        logger.info("Discord gateway connected")
+
+    async def on_disconnect(self):
+        logger.warning("Discord gateway disconnected")
 
     async def on_ready(self):
+        logger.info("Discord bot READY as %s in %d guild(s)", self.user, len(self.guilds))
         await refresh_depot_emojis()
 
     async def on_guild_emojis_update(self, guild, before, after):
@@ -854,6 +888,7 @@ async def run_bot_with_retries():
 
     while True:
         try:
+            logger.info("Starting Discord bot connection (attempt %d)", attempt + 1)
             await bot.start(TOKEN)
             return
         except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
@@ -861,6 +896,7 @@ async def run_bot_with_retries():
             if isinstance(exc, discord.HTTPException):
                 status = getattr(exc, "status", None)
                 if status != 429 and (status is None or status < 500):
+                    logger.exception("Non-retryable Discord HTTP error; cannot start bot")
                     raise
 
             attempt += 1
@@ -877,23 +913,29 @@ async def run_bot_with_retries():
             except (TypeError, ValueError):
                 pass
 
-            print(
-                f"Discord connection failed ({type(exc).__name__}: {exc}). "
-                f"Retrying in {delay:.0f}s (attempt {attempt})."
+            logger.warning(
+                "Discord connection failed (%s: %s); retrying in %.0fs (attempt %d)",
+                type(exc).__name__, exc, delay, attempt, exc_info=True,
             )
             try:
                 await bot.close()
             except Exception as close_exc:
-                print(f"Warning: error while closing Discord client: {close_exc}")
+                logger.warning("Error while closing Discord client: %s", close_exc)
             finally:
                 bot.clear()
 
             await asyncio.sleep(delay)
+        except Exception:
+            logger.exception("Unexpected fatal error starting the Discord bot")
+            raise
 
 
 if __name__ == "__main__":
     if not TOKEN:
-        print("Error: DISCORD_TOKEN environment variable not found.")
+        logger.error("DISCORD_TOKEN environment variable is missing or blank")
     else:
+        if not MTA_KEY:
+            logger.warning("MTA_API_KEY is missing; real-time MTA requests may fail")
+        logger.info("Starting Flask health server and Discord client")
         Thread(target=run_health_server, daemon=True).start()
         asyncio.run(run_bot_with_retries())
